@@ -1,0 +1,49 @@
+experiment:
+  name: semreg_gs_smoke
+  seed: 42
+
+data:
+  dataset: hssd
+  scene_id: "107734119_175999932"
+  donor_target_pairs: 1
+  semantic_classes:
+    - wall
+    - floor
+    - ceiling
+    - door
+    - window
+    - other
+  reference_views: 3
+  target_gt_views: 8
+  image_width: 512
+  image_height: 512
+
+gaussians:
+  max_count: 100000
+  freeze_position: true
+  freeze_rotation: true
+  freeze_scale: true
+  train_color_or_sh: true
+  train_opacity_residual: false
+
+model:
+  reference_encoder: dinov2
+  conditioning: semantic_region
+  decoder: mlp
+  mixed_precision: fp16
+
+training:
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  max_steps: 2000
+  learning_rate: 0.0001
+  checkpoint_every: 250
+
+evaluation:
+  metrics:
+    - psnr
+    - ssim
+    - lpips
+    - region_dino
+    - semantic_leakage
+    - point_to_mesh_distance

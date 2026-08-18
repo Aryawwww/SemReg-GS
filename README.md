@@ -1,8 +1,271 @@
 # SemReg-GS 实验设计
 
-> **目标**：验证“语义区域对应”是否能把现有建筑照片的外观，受控地迁移到几何不同、由 CAD 定义的未来室内空间，并在 CAD-anchored 3D Gaussians 中保持几何准确和跨视角一致。
+> **目标**：研究在 source building 与 target CAD 几何不同、没有逐点几何对应的情况下，能否以建筑语义作为 correspondence，将现有建筑照片的区域级外观迁移到 CAD-anchored 3D Gaussians，并保持几何准确、区域可控和跨视角一致。
+
+## 0. 从这里开始：数据与实验执行路线
+
+### 当前数据决策
+
+**不要等待 3D-FRONT 审批后才开始实验。** 当前采用以下四层数据组合：
+
+| 层级 | 数据集 | 在本项目中的作用 | 当前行动 |
+|---|---|---|---|
+| 即时主数据 | **HSSD** | 可编辑室内场景、语义对象和较完整材质；用于 smoke test 与 pilot | 立即下载 1 个场景，检查 GLB、材质和语义 |
+| 最终标准数据 | **3D-FRONT/3D-FUTURE** | 与 RoomPainter 等工作可比；用于扩大主实验 | 保留 Hugging Face 申请，同时尝试阿里天池官方入口 |
+| 受控辅助数据 | **OpenRooms** | albedo、roughness、lighting、semantic GT；验证阴影/高光是否被错误当作材质 | 主流程跑通后下载少量场景和 GT |
+| 真实域验证 | **ScanNet++** | 真实照片、相机和语义；验证 synthetic-to-real | 最后只下载 5–10 个场景子集 |
+
+HSSD 是当前最实际的 3D-FRONT 替代，但不是永久删除 3D-FRONT：
+
+```text
+HSSD：立即完成可编辑场景闭环和主方法 pilot
+  ↓
+3D-FRONT：获批后扩大规模并与房间级强 baseline 对齐
+  ↓
+OpenRooms：独立验证材质与光照解耦
+  ↓
+ScanNet++：验证真实建筑照片泛化
+```
+
+### 新成员只需按此顺序执行
+
+- [x] **Step 1 — 环境检查**：`semreg-gs-v1` 已安装 PyTorch 2.13.0+cu126，CUDA 可识别 RTX 4060 Laptop GPU，并通过 GPU 矩阵运算测试。
+- [x] **Step 2 — 获取一个 HSSD 场景**：已下载场景 `107734119_175999932` 到 `data/raw/hssd/`，并保存来源、许可和 SHA-256 清单。
+- [x] **Step 3 — 资产审计**：Blender 5.2 已成功导入场景；mesh、米制尺度、纹理/PBR 节点和官方对象类别映射均可读取，未映射模板暂归为 `other`。
+- [x] **Step 4 — 统一五类语义**：已映射为 `wall / floor / ceiling / door / window / other`，并保存可复现的逐面规则、`semantic_mapping.json` 和语义剖视预览。
+- [x] **Step 5 — 多视角渲染**：已完成单场景渲染管线 smoke test，固定几何输出 3 张 donor reference 和 8 张 target views；每个视角均包含 RGB、semantic mask、32-bit EXR depth/normal 和 camera JSON。
+- [x] **Step 6 — CAD-anchored Gaussians**：已完成 100,000 个 semantic Gaussians 的表面采样、标签继承、冻结参数导出、几何验证、中性外观 smoke 训练和双模式渲染验证。
+- [ ] **Step 7 — 最小三方法比较**：在相同场景、相机和训练预算下运行 `Global`、`B_sem-2D`、`Semantic-DINO`。
+- [ ] **Step 8 — 完成 10 个 HSSD pair**：报告 region LPIPS/DINO、Semantic Leakage、multi-view error 和 CAD surface distance；不满足 Go/No-Go 判据时先修数据。
+- [ ] **Step 9 — 加入强 baseline**：依次运行 `StyleGaussian-global → MaterialMVP whole-room → MaterialMVP semantic-submesh → TRELLIS.2`。
+- [ ] **Step 10 — 扩大与验证**：3D-FRONT 获批后做 100–300 pairs；OpenRooms 做材质/光照消融；ScanNet++ 做真实域测试。
+
+### 当前 Smoke Test：实验设计与实际结果（2026-08-18）
+
+这一节记录已经实际运行的实验，不是未来计划。当前完成的是 **Step 1–6 的单场景数据、Gaussian 初始化与渲染闭环**；尚未比较 Global、B_sem-2D 与 Semantic-DINO，因此当前结果只能证明数据管线和固定几何 smoke baseline 可用，不能证明论文假设成立。
+
+#### 本轮实验目的
+
+在开始 3DGS 训练前，先回答以下工程问题：
+
+1. HSSD 的完整室内 GLB 能否在本机 Blender 中正确加载；
+2. mesh、尺度、材质、纹理和对象语义是否可读取；
+3. 能否将原始类别统一成 `wall / floor / ceiling / door / window / other`；
+4. RGB、semantic mask、depth、normal 和相机参数能否在同一相机下同步输出；
+5. 当前 8 GB GPU 机器是否足以承担后续低分辨率、低 Gaussian 数量的 smoke test。
+
+#### 实验输入与控制变量
+
+| 项目 | 本轮设置 |
+|---|---|
+| 数据集 | HSSD 官方 Hugging Face 仓库，CC BY-NC 4.0 |
+| Scene ID | `107734119_175999932` |
+| 原始场景 | 78,510,308 bytes 的 glTF 2.0 GLB |
+| 场景角色 | 同一场景同时用于 donor-view 与 target-view 渲染管线测试 |
+| 渲染器 | Blender 5.2.0 LTS / Eevee + Workbench semantic pass |
+| 图像分辨率 | 512 × 512 |
+| Donor views | 3：living room、bedroom、kitchen |
+| Target views | 8：living room ×2、bedroom、kitchen、hallway ×2、bathroom、utility room |
+| 相机高度 | 1.50 m |
+| 相机焦距 | 28 mm，36 mm sensor；`fx = fy = 398.22 px` |
+| 几何控制 | 所有模态共享同一 GLB、同一相机内外参，不修改几何 |
+| 随机种子 | `42`，供后续 Gaussian 采样与训练沿用 |
+
+当前使用同一场景并不是 cross-geometry 实验，而是为了隔离并验证渲染与标签管线。正式实验必须使用不同 scene ID 的 donor 和 target。
+
+#### 数据获取与许可结果
+
+- Hugging Face 设备授权登录成功；
+- 只下载一个完整 HSSD 场景，没有下载完整 38.5 GB 数据集；
+- 同时保存 `scene_instance.json`、官方 semantic config、semantic lexicon 和 condensed object semantics；
+- `manifest.json` 记录来源仓库、远程路径、文件大小、CC BY-NC 4.0 和 SHA-256；
+- 原始数据保持在 `data/raw/hssd/107734119_175999932/`，处理结果写入 `data/processed/`，没有修改原始文件。
+
+#### 资产审计结果
+
+| 指标 | 实际结果 | 判断 |
+|---|---:|---|
+| 场景尺寸 | 8.71 × 11.13 × 2.81 m | 符合室内米制尺度 |
+| Mesh 数量 | 486 | 可读取 |
+| 顶点数 | 426,047 | 可读取 |
+| 多边形数 | 530,720 | 可读取 |
+| 材质数 | 181 | 可读取 |
+| 图像数 | 115 | 可读取 |
+| Image Texture 材质 | 64 | 可读取 |
+| Normal Map 节点 | 20 | 可读取 |
+| Principled BSDF | 181 | 可读取 |
+| Object instances | 61 | 可读取 |
+| 成功解析类别的实例 | 58 / 61 | 3 个未解析实例暂归 `other` |
+
+未解析的 3 个实例共享模板 `224-132`。这一问题不会阻塞六类建筑语义 smoke test，但进入 Pilot 前必须检查它是否属于 wall、floor、ceiling、door 或 window；否则继续保留为 `other`。
+
+#### 六类语义映射设计
+
+统一标签固定为：
+
+| ID | 类别 | 预览颜色 | 主要映射依据 |
+|---:|---|---|---|
+| 0 | wall | red | `wall` GLB 名称；其余 `geometry_*` 垂直结构面 |
+| 1 | floor | green | `geometry_*` 中接近 z=0 m 的水平结构面 |
+| 2 | ceiling | blue | `ceiling` 名称；接近 z=2.8 m 的水平结构面 |
+| 3 | door | orange | `FP_DOOR / DOORFRAME / DOORHANDLE` |
+| 4 | window | cyan | `FP_GLASS / GLASSBORDER / window` |
+| 5 | other | gray | 家具、设备及无法可靠映射的对象 |
+
+映射严格采用“官方 metadata 和 GLB 命名优先，结构几何规则补充，其他全部回退为 `other`”。法线/高度规则只作用于 `geometry_*`，避免把桌面、床面等水平家具误标成 floor。
+
+逐面映射结果：
+
+| 类别 | Polygon 数量 |
+|---|---:|
+| wall | 1,375 |
+| floor | 40 |
+| ceiling | 22 |
+| door | 4,044 |
+| window | 258 |
+| other | 524,981 |
+| **合计** | **530,720** |
+
+`other` 占比高是预期现象，因为完整房间中的家具模型包含大量高细节三角形，而建筑壳体由较少的大三角面组成。后续采样 Gaussians 时应按表面积而不是 polygon 数量分配，避免家具细分程度影响类别采样比例。
+
+当前将 `FP_GLASS` 映射为 window。该规则可能把玻璃门误标为 window，是进入 Pilot 前需要人工复核的已知边界。
+
+#### 多视角多模态渲染设计
+
+每个视角保存：
+
+```text
+<view_id>/
+├── rgb.png          # 512×512 PBR appearance render
+├── semantic.png     # 六类语义着色图
+├── depth.exr        # 32-bit float Depth layer
+├── normal.exr       # 32-bit vector Normal layer
+└── camera.json      # intrinsics + camera-to-world + world-to-camera
+```
+
+Blender 5.2 修改了 compositor API。本项目使用新版 `CompositorNodeTree`、`directory/file_name` 和显式 `FLOAT Depth / VECTOR Normal` sockets 输出 EXR。RGB 与 geometry passes 分开渲染，避免 compositor 缺少主图输出造成黑帧；语义阶段解除 compositor 后使用 Workbench flat-material pass。
+
+#### 多视角渲染结果
+
+| 检查项 | 实际结果 |
+|---|---:|
+| Donor reference views | 3 / 3 完整 |
+| Target views | 8 / 8 完整 |
+| 每视角文件数 | 5 |
+| RGB 分辨率 | 512 × 512 |
+| 相机矩阵 | 4 × 4 camera-to-world 与 world-to-camera |
+| EXR 文件头 | 有效 OpenEXR magic `762f3101` |
+| 完整视角数 | 11 / 11 |
+| RGB 非黑帧 | 已视觉检查通过 |
+| RGB–semantic 对齐 | 已在代表性视角视觉检查通过 |
+
+语义 PNG 中约 76.8% 像素恰好等于六种类别 RGB，其余主要是抗锯齿边缘和黑色背景。训练前应执行 nearest-palette 解码，或额外输出关闭抗锯齿的单通道 class-ID mask；不能直接把所有非精确 RGB 当作新类别。
+
+#### 当前可复现产物
+
+```text
+data/raw/hssd/107734119_175999932/
+├── scene.glb
+├── scene_instance.json
+├── semantic_config.json
+├── semantic_lexicon.json
+├── hssd_obj_semantics_condensed.csv
+└── manifest.json
+
+data/processed/targets/107734119_175999932/
+└── semantic_mapping.json
+
+outputs/smoke/107734119_175999932/
+├── asset_audit.json
+├── semantic_audit.json
+├── asset_preview.png
+├── semantic_preview.png
+└── multiview/
+    ├── render_manifest.json
+    ├── donor_reference/reference_00..02/
+    └── target_views/view_00..07/
+```
+
+关键脚本：
+
+```text
+scripts/download_hssd_smoke.py
+scripts/audit_hssd_blender.py
+scripts/audit_hssd_semantics.py
+scripts/create_semantic_mapping_blender.py
+scripts/render_hssd_multiview.py
+```
+
+#### 当前结论
+
+**已支持的结论：**
+
+1. 本机环境可以完成 HSSD 单场景资产处理和 512×512 多模态渲染；
+2. HSSD 场景具备可读取的几何、PBR 资源、对象实例和可统一的建筑语义；
+3. 六类映射与 RGB/semantic/depth/normal/camera 同步输出闭环已跑通；
+4. 当前数据可以进入 CAD-anchored Gaussian 初始化阶段。
+
+**尚不支持的结论：**
+
+1. 尚未证明 semantic conditioning 优于 global conditioning；
+2. 尚未测量 Semantic Leakage、region LPIPS/DINO 或 multi-view warp error；
+3. 尚未证明 Gaussian center 到 CAD surface 的距离接近零；
+4. 尚未完成不同几何的 donor–target pair；
+5. 尚未与 StyleGaussian、MaterialMVP 或 TRELLIS.2 比较。
+
+因此当前里程碑是 **data/rendering/fixed-geometry Gaussian smoke pipeline passed**，不是 **SemReg-GS method validated**。
+
+#### Step 6 实际结果
+
+- 从 target mesh 按三角面面积采样并导出了 100,000 个 Gaussian；六类计数为 wall 40,102、floor 9,505、ceiling 7,651、door 6,224、window 268、other 36,250。
+- `semantic_id` 与 `source_face_id` 验证通过；Gaussian center 到来源三角面的最大重建误差为 `1.134145e-6 m`，低于 `1e-5 m` 阈值。
+- 中性外观 smoke 训练使用 8 个 target views，仅优化 RGB/SH-DC，冻结 xyz、normal、rotation、scale 和 semantic ID；覆盖 83,113 / 100,000 个 Gaussian（83.11%），300 步 L1 从 `8.788e-5` 降至 `5.689e-5`。
+- 外观与语义双模式渲染成功输出 8 个视角；固定半径点投影的像素覆盖率为 12.52%–50.60%，语义空间结构与相机方向一致。
+- 当前实现是便携式 point-zbuffer smoke baseline，不是各向异性 CUDA Gaussian rasterizer。当前 `target_views/*/rgb.png` 的像素值仅为 0/1，因此外观图接近黑色；进入正式 3DGS 训练前必须修正上游 RGB 导出范围。
+
+#### 下一实验
+
+下一步执行 Step 7：先修正 RGB 导出并复验中性外观，然后在相同 Gaussian、相机和预算下实现 `Global`、`B_sem-2D` 与 `Semantic-DINO` 三方法比较。
+
+### Step 1–8 的最小完成产物
+
+```text
+outputs/pilot/<pair_id>/
+├── input/
+│   ├── donor_reference_rgb/
+│   ├── donor_reference_masks/
+│   ├── target_mesh.glb
+│   └── semantic_mapping.json
+├── global/
+├── semantic_2d/
+├── semantic_dino/
+├── ground_truth/
+├── comparison_grid.png
+├── metrics.json
+└── camera_path.mp4
+```
+
+完成标志不是“生成了一张好看的图”，而是同一个 donor–target pair 能复现三种方法，并得到区域准确性、泄漏、跨视角一致性和几何保持的可比较结果。
 
 ## 1. 最小论文命题
+
+### 最小 paper claim
+
+> **We investigate reference-conditioned appearance transfer between geometrically different indoor scenes by using architectural semantics as the correspondence between real images and CAD-anchored 3D Gaussians.**
+
+中文：
+
+> **我们研究如何利用建筑语义作为不同几何场景之间的对应关系，将真实建筑照片中的区域级外观迁移到没有目标照片的 CAD-anchored 3D Gaussian 场景。**
+
+这里的核心不是简单的 `semantic-aware StyleGaussian`，而是：
+
+```text
+Geometry(source building) != Geometry(target CAD)
+
+source wall  <---- architectural semantics ----> target wall
+source floor <---- architectural semantics ----> target floor
+source door  <---- architectural semantics ----> target door
+```
 
 ### 研究问题
 
@@ -23,17 +286,51 @@
 
 > 与向整个场景广播一个全局风格向量相比，按 `wall / floor / ceiling / door / window` 聚合参考特征，并只条件化对应语义的 Gaussians，会显著提高区域对应准确率、参考相似度和跨视角稳定性。
 
+统计假设写为：
+
+```text
+H1: Leakage_semantic < Leakage_global
+H2: RegionSimilarity_semantic > RegionSimilarity_global
+H3: MultiViewError_semantic <= MultiViewError_global
+```
+
+不预先写死“必须提升 20%”。主实验使用配对场景差值、95% confidence interval、effect size 和配对统计检验判断效果是否稳定。
+
+### 三项预期贡献
+
+1. **Architectural semantic correspondence**：将参考照片分解为 region-specific appearance representations，而不是一个全局 style code。
+2. **Cross-geometry transfer**：source 与 target 不需要形状或逐点对应，只依赖 wall-to-wall、floor-to-floor 等建筑语义对应。
+3. **CAD-constrained Gaussian generation**：Gaussian `xyz` 固定或投影约束在 CAD 表面，normal 受 CAD 约束，实现 appearance generation without geometry drift。
+
 ### 建议论文名称
 
 **SemReg-GS: Semantic Region-Guided Appearance Transfer to CAD-Anchored 3D Gaussians**
 
 本实验第一版只预测 Gaussian 外观参数（RGB/SH 或外观 feature）；不同时解决完整 PBR、建筑融合和 CAD 生成。PBR 分解可以作为第二阶段扩展。
 
+必须正面区分 MaterialMVP：MaterialMVP 已经完成 `mesh + reference image -> illumination-invariant multi-view PBR textures`。因此本文不能把“reference-conditioned appearance transfer”本身当成贡献；贡献必须落在**不同建筑几何之间的语义 correspondence、区域可控性和 CAD-constrained Gaussian representation**上。
+
 ---
 
-## 2. 数据库选择
+## 2. 数据库选择与替代策略
 
-### 2.1 主数据库：3D-FRONT + 3D-FUTURE
+### 2.1 即时主数据：HSSD
+
+3D-FRONT 授权等待期间，HSSD 用于第一轮 smoke test 和 pilot：
+
+- 211 个高质量合成室内场景和 18,656 个物体模型；
+- 提供可加载的 3D 场景资产，适合检查 mesh、材质和语义；
+- 数据规模虽小，但足以验证 cross-geometry semantic transfer；
+- 采用 CC BY-NC 4.0，使用和发布结果时必须遵守非商业条款。
+
+第一轮只选 10–20 个结构清楚的场景。原始类别必须通过 `semantic_mapping.json` 显式映射为 `wall / floor / ceiling / door / window / other`；无法可靠映射的对象标为 `other`。
+
+来源：
+
+- HSSD 官方主页：https://3dlg-hcvc.github.io/hssd/
+- HSSD 数据入口：https://huggingface.co/datasets/hssd/hssd-models
+
+### 2.2 最终标准数据：3D-FRONT + 3D-FUTURE
 
 这是第一版最合适的数据，而不是 Objaverse。
 
@@ -53,7 +350,24 @@
 - RoomPainter：https://arxiv.org/abs/2412.16778
 - RoomPainter CVPR 页面：https://openaccess.thecvf.com/content/CVPR2025/html/Huang_RoomPainter_View-Integrated_Diffusion_for_Consistent_Indoor_Scene_Texturing_CVPR_2025_paper.html
 
-### 2.2 真实域验证：ScanNet++ v2
+当前 Hugging Face 请求正在等待维护者审批。等待期间使用 HSSD，不把审批作为 Stage 1 的阻塞条件。同时可以检查阿里天池官方入口；不得使用绕过授权的非官方网盘镜像。
+
+- 3D-FRONT 阿里天池入口：https://tianchi.aliyun.com/specials/promotion/alibaba-3d-scene-dataset
+
+### 2.3 受控辅助数据：OpenRooms
+
+OpenRooms 不替代完整可编辑场景，而用于判断模型迁移的是材质，还是照片中的固定阴影和高光。它提供同一 CAD 的不同材质/光照版本，以及 albedo、roughness、depth、normal、lighting 和 45 类 semantic labels。
+
+```text
+same material + different lighting -> 材质表示应保持稳定
+same lighting + different material -> 迁移结果应随材质明显变化
+```
+
+完整重新渲染所需的部分 SVBRDF 来自 Adobe Stock。第一阶段只使用官方发布的 renderings 和 ground truth，不重新分发受限材质。
+
+- OpenRooms 官方仓库：https://github.com/ViLab-UCSD/OpenRooms
+
+### 2.4 真实域验证：ScanNet++ v2
 
 ScanNet++ 不作为第一阶段训练集，而用于验证合成数据训练的方法能否处理真实建筑照片。
 
@@ -74,7 +388,18 @@ ScanNet++ 不作为第一阶段训练集，而用于验证合成数据训练的�
 - 数据结构：https://scannetpp.mlsg.cit.tum.de/scannetpp/documentation
 - 官方工具：https://github.com/scannetpp/scannetpp
 
-### 2.3 Objaverse 的用途
+### 2.5 其他备选数据的边界
+
+| 数据集 | 可以帮助什么 | 为什么不作为当前首选 |
+|---|---|---|
+| Infinigen Indoors | 程序化产生 Blender 场景、语义和 GT | 搭建与渲染成本较高，作为 HSSD 不可用时的开放式 fallback |
+| Structured3D | 房间结构、布局和语义监督 | 不够直接支持完整可编辑 PBR/CAD-to-GS 主流程 |
+| InteriorVerse | PBR、几何和空间变化光照研究 | 需要签署协议并邮件申请，不能解决当前等待问题 |
+| Hypersim | 强图像级材质、光照和语义 GT | 数据量大，完整源场景资产存在商业资产限制 |
+
+不能因为数据含 RGB 和 semantic mask，就默认它能替代 3D-FRONT。主数据至少需要 target geometry、相机、多视角渲染能力和可映射的建筑语义。
+
+### 2.6 Objaverse 的用途
 
 MaterialMVP 公开 paper checkpoint 使用 Objaverse 数据，TRELLIS.2 训练配置使用 Objaverse-XL。它们适合单体 3D 资产的 PBR/纹理预训练，但不适合直接作为本实验的房间级主数据库。
 
@@ -94,7 +419,9 @@ MaterialMVP 公开 paper checkpoint 使用 Objaverse 数据，TRELLIS.2 训练�
 
 | 用途 | 数据库 | 原因 |
 |---|---|---|
-| 主要训练和定量评估 | 3D-FRONT/3D-FUTURE | 房间 mesh、语义、纹理齐全；与 RoomPainter 可比；可构造迁移真值 |
+| Smoke test 与 pilot | HSSD | 可立即启动；场景质量高、资产可编辑、语义可映射 |
+| 扩大训练和最终定量评估 | 3D-FRONT/3D-FUTURE | 与 RoomPainter 可比；可构造迁移真值 |
+| 材质/光照解耦 | OpenRooms | 同 CAD 不同材质/光照及 albedo、roughness、lighting GT |
 | 真实参考图泛化 | ScanNet++ v2 | 真实 DSLR、语义 mesh、相机和官方 3DGS 工具齐全 |
 | 资产级强 baseline | Objaverse / Objaverse-XL | MaterialMVP 与 TRELLIS.2 的公开训练数据来源 |
 
@@ -124,7 +451,7 @@ held-out target cameras
 
 ### 3.2 配对规则
 
-1. 从 3D-FRONT 选择 bedroom、living room 或 corridor；第一版只选一种房型。
+1. Pilot 从 HSSD 选择 bedroom、living room 或 corridor；3D-FRONT 获批后沿用相同规则扩展；第一版只选一种房型。
 2. 过滤损坏 mesh、缺失纹理和语义不完整的场景。
 3. target 与 donor 必须是不同 scene ID，且布局/几何不能相同。
 4. 两者至少同时包含 `wall / floor / ceiling`；door/window 可以先作为可选类别。
@@ -148,7 +475,45 @@ M_D = {
 
 这样可以准确测量：模型是否从参考图恢复了 donor 材质，并迁移到了不同几何的 target。
 
-### 3.4 第一轮数据规模
+但 oracle 不能永远是“一类一个均匀材质”，否则任务会退化为识别语义后复制纹理。因此数据难度分三级推进。
+
+### 3.4 数据难度三级设计
+
+#### Level 1：Uniform material
+
+```text
+wall -> one material
+floor -> one material
+ceiling -> one material
+```
+
+只用于 Smoke test，验证语义、UV、Gaussian 和渲染闭环，不用于主要创新结论。
+
+#### Level 2：Intra-class variation
+
+同一个语义类别内部存在外观变化，例如：
+
+- wall：painted plaster / wood panel / concrete；
+- floor：light oak / dark oak / stone；
+- 同一 wall 上出现 panel、边框或局部 variation；
+- 多张 reference 对同一类别提供不同可见区域。
+
+模型需要学习 region appearance distribution，而不是给整个类别复制一个均值。
+
+#### Level 3：Geometry-dependent appearance
+
+加入：
+
+- 大尺度图案及 texture scale；
+- 墙角、门框、窗边等 boundary interaction；
+- 视角相关效果；
+- 窗口附近光照变化；
+- 缺失语义区域和遮挡；
+- real reference -> unseen CAD。
+
+论文证据链按 `controlled -> complex -> real` 展开。Level 1 只证明系统可运行；Level 2 是主要定量结论；Level 3 证明现实价值。
+
+### 3.5 第一轮数据规模
 
 先做小规模可行性验证，不要立即训练大模型。
 
@@ -173,8 +538,10 @@ Experient/
 │   └── main.yaml
 ├── data/
 │   ├── raw/
+│   │   ├── hssd/
 │   │   ├── 3d_front/
 │   │   ├── 3d_future/
+│   │   ├── openrooms/
 │   │   └── scannetpp/
 │   ├── processed/
 │   │   ├── donors/
@@ -192,6 +559,8 @@ Experient/
 │   └── TRELLIS.2/
 ├── scripts/
 │   ├── prepare_3dfront.py
+│   ├── prepare_hssd.py
+│   ├── prepare_openrooms.py
 │   ├── build_pairs.py
 │   ├── render_references.py
 │   ├── create_oracle_transfer.py
@@ -239,11 +608,26 @@ g_i = [position_i, normal_i, semantic_embedding_i, reference_token_sem(i)]
 
 处理步骤：
 
-1. 使用 DINOv2/CLIP 图像编码器提取 dense feature map；
+特征实验严格按以下顺序进行：
+
+```text
+RGB / texture statistics baseline
+        ↓
+DINOv2 dense visual features（主方法）
+        ↓
+CLIP（仅作为可选附加实验）
+```
+
+DINOv2 是第一选择，因为任务关注局部纹理、颜色和 dense visual similarity；CLIP 更偏全局语义概念，第一版不同时引入两个大型 feature encoder。
+
+具体步骤：
+
+1. 使用 DINOv2 提取 dense feature map；
 2. 将 semantic mask 下采样到 feature map 分辨率；
 3. 对同一语义的所有像素和多个 reference views 做 masked attention pooling；
 4. 得到 `z_wall, z_floor, z_ceiling, z_door, z_window`；
 5. 缺失类别使用可学习的 `unknown` token，并在 loss 中屏蔽其 reference matching 项。
+6. 分别测试 1 / 3 / 5 张 reference，报告性能随参考图数量变化的曲线。
 
 ### 5.3 语义条件化 Gaussian 解码器
 
@@ -304,10 +688,14 @@ L_total =
 |---|---|---|
 | B0 | Neutral CAD-GS | 只验证几何和相机流程，不做迁移 |
 | B1 | Global reference code | 所有 Gaussian 使用同一个参考图全局 feature；这是最重要对照 |
+| B_sem-2D | Simple semantic statistics | semantic mask + mean RGB / colour histogram / shallow texture statistics -> 对应 Gaussian；回答是否真的需要学习模型 |
 | B2 | StyleGaussian-global | 在 CAD-anchored GS 上使用 StyleGaussian 风格嵌入/解码，不加入语义区域 |
-| B3 | MaterialMVP zero-shot | 输入 target mesh + donor reference；测试最接近的 image-to-PBR 方法 |
-| B4 | TRELLIS.2 texturing zero-shot | 测试强基础模型在房间 mesh 上的零样本能力 |
+| B3 | MaterialMVP zero-shot | **最重要、最危险 baseline**；输入 target mesh + donor reference，比较 PBR 质量、跨视角一致性与区域可控性 |
+| B4 | MaterialMVP semantic-submesh | 对 wall/floor/... 子 mesh 分别运行 MaterialMVP 后合并；避免只比较其不擅长的整房间设置 |
+| B5 | TRELLIS.2 texturing zero-shot | 测试强基础模型在房间 mesh 上的零样本能力 |
 | Ours | Semantic reference codes | 每个 Gaussian 使用同类区域的 reference token |
+
+MaterialMVP 的比较必须回答：即使它在 PBR realism 和 relighting 上更强，本文是否能在 `cross-geometry architectural correspondence`、局部编辑控制和 Semantic Leakage 上显著更好。
 
 RoomPainter 是重要的场景级相关工作，但它是 text-conditioned mesh texturing，并非 image-conditioned Gaussian transfer。若官方实现可稳定复现，将 reference image 自动 caption 后作为额外定性 baseline；不要因复现困难阻塞主实验。
 
@@ -345,6 +733,18 @@ Leakage(wall) =
 
 越低越好。对五类分别计算。这是最能支持“受控区域级迁移”贡献的指标。
 
+报告形式：
+
+```text
+Global leakage: mean ± std
+Ours leakage:   mean ± std
+Paired delta:   mean difference + 95% CI
+Effect size:    paired Cohen's d 或 rank-biserial correlation
+Test:           paired t-test；非正态时用 Wilcoxon signed-rank
+```
+
+不人为设定 20% 为 meaningful threshold。
+
 ### 8.3 多视角一致性
 
 - 用 target depth 和 camera pose 将相邻视图 warp 到同一视图；
@@ -372,13 +772,15 @@ Leakage(wall) =
 
 ### Stage 0：环境与数据许可
 
+- [ ] 接受 HSSD 数据许可并只下载 1 个场景；
+- [ ] 保存 HSSD、OpenRooms 和后续数据的原始 LICENSE/TERMS 记录；
 - [ ] 申请 3D-FRONT/3D-FUTURE 数据访问；
 - [ ] 申请 ScanNet++ 访问，仅下载少量场景；
 - [ ] 克隆官方 3DGS 和 StyleGaussian；
 - [ ] 记录 CUDA、PyTorch、GPU 型号和依赖版本；
 - [ ] 不要在许可未确认前重新分发原始数据。
 
-**完成标准**：一个 3D-FRONT 房间可在 Blender 中正确加载，语义和纹理没有错位。
+**完成标准**：一个 HSSD 房间可在 Blender 中正确加载，几何、语义和纹理没有错位；3D-FRONT 是否已获批不影响进入 Stage 1。
 
 ### Stage 1：单样本数据闭环
 
@@ -392,16 +794,24 @@ Leakage(wall) =
 
 **完成标准**：可以可视化 wall/floor/... 五种颜色的 Gaussian scene，并能从任意相机渲染。
 
-### Stage 2：最简单的关键实验
+### Stage 2：最简单、当前最高优先级的关键实验
 
-只训练两个模型：
+先比较三个方法：
 
 1. `Global`: 一个全局 reference code；
-2. `Semantic`: 五个 semantic reference codes。
+2. `B_sem-2D`: semantic mask + 简单 RGB/texture statistics；
+3. `Semantic`: 五个 DINO semantic reference codes。
 
 其余网络、训练步数、相机和损失完全相同。
 
-**完成标准**：在 10 个 pilot pairs 上，Semantic 在至少两个核心指标上稳定优于 Global，尤其是 semantic leakage 和 region DINO similarity。
+输出每个 pair 的：
+
+```text
+Global render | B_sem-2D render | Semantic render | GT render
+Region LPIPS  | Region DINO      | Leakage         | Multi-view error
+```
+
+**完成标准**：在配对 pilot scenes 上，Semantic 相对 Global 的 leakage 差值置信区间支持降低趋势，并提高 region similarity；同时必须说明它相对简单 B_sem-2D 的增益。如果 B_sem-2D 已达到相近结果，优先增强 Level 2 数据难度，而不是立刻增加网络规模。
 
 如果此阶段没有优势，应先检查：
 
@@ -472,11 +882,13 @@ Leakage(wall) =
 
 进入完整论文实验前，pilot 必须满足：
 
-1. Semantic 方法的 region DINO similarity 优于 Global；
-2. Semantic Leakage Score 至少相对降低 20%；
-3. held-out view LPIPS 不劣于 Global；
-4. CAD point-to-surface distance 接近零；
-5. 三种不同 donor-target pair 上都能看到相同趋势，而不是只成功一个案例。
+1. Semantic 方法的 region DINO similarity 在配对场景上稳定优于 Global；
+2. `Leakage_semantic < Leakage_global`，并报告 paired delta、95% CI、effect size 和统计检验；不使用任意百分比阈值；
+3. Semantic 相对 B_sem-2D 有可解释增益，或明确显示简单方法在哪种 Level 2/3 情况下失效；
+4. held-out view LPIPS / warped consistency 不劣于 Global；
+5. CAD point-to-surface distance 接近零；
+6. 多个 donor-target pair 上趋势一致，而不是只成功一个案例；
+7. 1 / 3 / 5 references 形成可解释的性能曲线。
 
 如果只提高“好看程度”，但没有降低语义泄漏或提高区域对应，则还不足以支持论文贡献。
 
@@ -489,16 +901,19 @@ Leakage(wall) =
 3. CAD anchoring 是否确实保证了几何不被外观优化破坏？
 4. 当参考图缺少 ceiling/window 时如何处理？
 5. 合成 3D-FRONT 训练能否泛化到 ScanNet++ 真实照片？
-6. MaterialMVP/TRELLIS.2 在整个房间和分语义子 mesh 上分别表现如何？
+6. MaterialMVP 在整个房间和分语义子 mesh 上分别表现如何；本文为何不是重复 image-conditioned PBR generation？
 7. 结果是否在未见过的相机视角保持稳定？
 
-这七个问题都能得到清楚答案时，实验才形成一条完整的论文证据链。
+8. 简单的 semantic RGB/texture statistics 是否已经足够，学习式 DINO feature transfer 的必要性在哪里？
+9. Level 1、Level 2、Level 3 难度提升时，各方法如何退化？
+
+这些问题都能得到清楚答案时，实验才形成一条完整的论文证据链。
 
 ---
 
 ## 13. 版本与来源记录
 
-本文档于 **2026-08-17** 根据以下官方论文、项目和数据文档制定：
+本文档于 **2026-08-18** 根据以下官方论文、项目和数据文档更新：
 
 - 3D Gaussian Splatting：https://arxiv.org/abs/2308.04079
 - StyleGaussian：https://github.com/Kunhao-Liu/StyleGaussian
@@ -506,6 +921,8 @@ Leakage(wall) =
 - RoomPainter：https://openaccess.thecvf.com/content/CVPR2025/html/Huang_RoomPainter_View-Integrated_Diffusion_for_Consistent_Indoor_Scene_Texturing_CVPR_2025_paper.html
 - TRELLIS.2：https://github.com/microsoft/TRELLIS.2
 - 3D-FRONT：https://arxiv.org/abs/2011.09127
+- HSSD：https://3dlg-hcvc.github.io/hssd/
+- OpenRooms：https://github.com/ViLab-UCSD/OpenRooms
 - ScanNet++：https://scannetpp.mlsg.cit.tum.de/scannetpp/
 
 开始实现前应再次检查各仓库最新 commit、模型权重可用性、数据下载条款和学术许可。

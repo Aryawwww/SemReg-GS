@@ -1,0 +1,14 @@
+# Downloaded and generated datasets
+data/**
+!data/**/
+!data/**/.gitkeep
+
+# Experiment outputs, renders, and checkpoints
+outputs/**
+!outputs/**/
+!outputs/**/.gitkeep
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
