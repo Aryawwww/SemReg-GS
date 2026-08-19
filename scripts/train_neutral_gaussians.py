@@ -8,6 +8,7 @@ baseline, not a replacement for the CUDA Gaussian rasterizer used later.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -30,7 +31,55 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--visibility-tolerance", type=float, default=0.03)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--minimum-observed-fraction", type=float, default=0.50)
     return parser.parse_args()
+
+
+def validate_rgb_views(view_directories: list[Path]) -> dict:
+    records = []
+    hashes = set()
+    errors = []
+    for view_directory in view_directories:
+        image_path = view_directory / "rgb.png"
+        camera_path = view_directory / "camera.json"
+        if not image_path.is_file() or not camera_path.is_file():
+            errors.append(f"{view_directory.name}: missing rgb.png or camera.json")
+            continue
+        camera = json.loads(camera_path.read_text(encoding="utf-8"))
+        image = np.asarray(Image.open(image_path).convert("RGB"), dtype=np.uint8)
+        digest = hashlib.sha256(image_path.read_bytes()).hexdigest()
+        hashes.add(digest)
+        unique_values = int(np.unique(image).size)
+        record = {
+            "view": view_directory.name,
+            "width": int(image.shape[1]),
+            "height": int(image.shape[0]),
+            "minimum": int(image.min()),
+            "maximum": int(image.max()),
+            "unique_8bit_values": unique_values,
+            "sha256": digest,
+        }
+        records.append(record)
+        if image.shape[1] != int(camera["width"]) or image.shape[0] != int(camera["height"]):
+            errors.append(f"{view_directory.name}: RGB and camera dimensions differ")
+        if record["maximum"] <= 1 and unique_values <= 4:
+            errors.append(f"{view_directory.name}: RGB is effectively a 0/1 image")
+    if len(records) != len(view_directories):
+        errors.append("one or more view directories are incomplete")
+    if len(hashes) < 2:
+        errors.append("all RGB views have identical file hashes")
+    if records and max(record["unique_8bit_values"] for record in records) < 16:
+        errors.append("the RGB view set has insufficient color variation")
+    report = {
+        "status": "passed" if not errors else "failed",
+        "view_count": len(records),
+        "distinct_file_hashes": len(hashes),
+        "views": records,
+        "errors": errors,
+    }
+    if errors:
+        raise RuntimeError("RGB validation failed: " + "; ".join(errors))
+    return report
 
 
 def project(
@@ -103,17 +152,28 @@ def main() -> None:
     view_directories = sorted(path for path in args.views.resolve().iterdir() if path.is_dir())
     if not view_directories:
         raise RuntimeError("No view directories were found")
+    rgb_validation = validate_rgb_views(view_directories)
 
     color_sum, counts, view_reports = gather_observations(
         xyz, view_directories, device, args.visibility_tolerance
     )
     observed = counts > 0
+    observed_fraction = float(observed.float().mean().item())
+    if not observed.any():
+        raise RuntimeError("No Gaussians were observed from the supplied cameras")
+    if observed_fraction < args.minimum_observed_fraction:
+        raise RuntimeError(
+            f"Observed Gaussian fraction {observed_fraction:.4f} is below "
+            f"the required {args.minimum_observed_fraction:.4f}"
+        )
     target_rgb = torch.full_like(color_sum, 0.5)
     target_rgb[observed] = color_sum[observed] / counts[observed, None]
-    initial = target_rgb.clamp(1e-4, 1.0 - 1e-4)
-    rgb_logits = torch.nn.Parameter(torch.logit(initial))
+    rgb_logits = torch.nn.Parameter(torch.zeros_like(target_rgb))
     optimizer = torch.optim.Adam([rgb_logits], lr=args.learning_rate)
     history = []
+    with torch.no_grad():
+        initial_l1 = torch.mean(torch.abs(torch.sigmoid(rgb_logits)[observed] - target_rgb[observed]))
+        initial_mse = torch.mean((torch.sigmoid(rgb_logits)[observed] - target_rgb[observed]) ** 2)
     for step in range(args.steps):
         optimizer.zero_grad(set_to_none=True)
         rgb = torch.sigmoid(rgb_logits)
@@ -124,6 +184,11 @@ def main() -> None:
             history.append({"step": step + 1, "l1": float(loss.detach().cpu())})
 
     rgb = torch.sigmoid(rgb_logits).detach().cpu().numpy().astype(np.float32)
+    with torch.no_grad():
+        final_rgb = torch.sigmoid(rgb_logits)[observed]
+        final_l1 = torch.mean(torch.abs(final_rgb - target_rgb[observed]))
+        final_mse = torch.mean((final_rgb - target_rgb[observed]) ** 2)
+        final_psnr = -10.0 * torch.log10(final_mse.clamp_min(1e-12))
     sh_dc = ((rgb - 0.5) / SH_C0).astype(np.float32)
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -149,12 +214,21 @@ def main() -> None:
         "view_count": len(view_directories),
         "observed_gaussians": int(observed.sum().item()),
         "unobserved_gaussians": int((~observed).sum().item()),
-        "observed_fraction": float(observed.float().mean().item()),
+        "observed_fraction": observed_fraction,
+        "minimum_observed_fraction": args.minimum_observed_fraction,
+        "rgb_validation": rgb_validation,
         "visibility_tolerance_m": args.visibility_tolerance,
         "optimized_parameters": ["rgb", "sh_dc"],
         "frozen_parameters": ["xyz", "normal", "rotation_wxyz", "scale", "semantic_id"],
         "steps": args.steps,
         "learning_rate": args.learning_rate,
+        "metrics": {
+            "initial_l1": float(initial_l1.cpu()),
+            "initial_mse": float(initial_mse.cpu()),
+            "final_l1": float(final_l1.cpu()),
+            "final_mse": float(final_mse.cpu()),
+            "final_psnr_db": float(final_psnr.cpu()),
+        },
         "loss_history": history,
         "views": view_reports,
         "limitations": [

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -141,25 +142,83 @@ def render_rgb_passes(
 ) -> None:
     scene.render.engine = "BLENDER_EEVEE"
     scene.render.film_transparent = False
-    scene.view_layers[0].use_pass_z = True
-    scene.view_layers[0].use_pass_normal = True
+    scene.use_nodes = False
+    scene.compositing_node_group = None
+    scene.render.image_settings.file_format = "PNG"
+    scene.render.image_settings.color_mode = "RGB"
+    scene.render.image_settings.color_depth = "8"
     scene.frame_set(1)
     for group, specs in groups:
         for spec in specs:
             view_directory = output_root / group / spec["name"]
             view_directory.mkdir(parents=True, exist_ok=True)
             configure_camera(camera, spec)
-            scene.use_nodes = False
-            scene.render.image_settings.file_format = "PNG"
-            scene.render.image_settings.color_depth = "8"
-            scene.render.filepath = str(view_directory / "rgb.png")
-            bpy.ops.render.render(write_still=True)
-            configure_compositor(scene, view_directory)
             bpy.ops.render.render(write_still=False)
+            bpy.data.images["Render Result"].save_render(filepath=str(view_directory / "rgb.png"), scene=scene)
             (view_directory / "camera.json").write_text(
                 json.dumps(camera_metadata(camera, width, height, spec), indent=2) + "\n",
                 encoding="utf-8",
             )
+
+
+def render_geometry_passes(
+    scene: bpy.types.Scene,
+    camera: bpy.types.Object,
+    groups: list[tuple[str, list[dict]]],
+    output_root: Path,
+) -> None:
+    scene.render.engine = "BLENDER_EEVEE"
+    scene.view_layers[0].use_pass_z = True
+    scene.view_layers[0].use_pass_normal = True
+    for group, specs in groups:
+        for spec in specs:
+            view_directory = output_root / group / spec["name"]
+            configure_camera(camera, spec)
+            configure_compositor(scene, view_directory)
+            bpy.ops.render.render(write_still=False)
+
+
+def validate_rgb_outputs(groups: list[tuple[str, list[dict]]], output_root: Path) -> dict:
+    records = []
+    hashes = set()
+    errors = []
+    for group, specs in groups:
+        for spec in specs:
+            path = output_root / group / spec["name"] / "rgb.png"
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            hashes.add(digest)
+            image = bpy.data.images.load(str(path), check_existing=False)
+            pixels = image.pixels[:]
+            channels = image.channels
+            rgb = pixels if channels == 3 else [value for index, value in enumerate(pixels) if index % channels < 3]
+            quantized = {max(0, min(255, round(value * 255.0))) for value in rgb}
+            record = {
+                "group": group,
+                "view": spec["name"],
+                "sha256": digest,
+                "minimum": min(rgb),
+                "maximum": max(rgb),
+                "unique_8bit_values": len(quantized),
+            }
+            records.append(record)
+            if record["maximum"] <= 0.01 and record["unique_8bit_values"] <= 4:
+                errors.append(f"{group}/{spec['name']}: RGB is effectively a 0/1 image")
+            bpy.data.images.remove(image)
+    if len(hashes) < 2:
+        errors.append("all RGB views have identical file hashes")
+    if max(record["unique_8bit_values"] for record in records) < 16:
+        errors.append("the RGB view set has insufficient color variation")
+    report = {
+        "status": "passed" if not errors else "failed",
+        "view_count": len(records),
+        "distinct_file_hashes": len(hashes),
+        "views": records,
+        "errors": errors,
+    }
+    (output_root / "rgb_validation.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if errors:
+        raise RuntimeError("RGB validation failed: " + "; ".join(errors))
+    return report
 
 
 def apply_semantic_materials(meshes: list[bpy.types.Object]) -> None:
@@ -251,6 +310,8 @@ def main() -> None:
         scene.world = bpy.data.worlds.new("RenderWorld")
     scene.world.color = (0.08, 0.08, 0.08)
     render_rgb_passes(scene, camera, groups, output_root, args.width, args.height)
+    rgb_validation = validate_rgb_outputs(groups, output_root)
+    render_geometry_passes(scene, camera, groups, output_root)
     apply_semantic_materials(meshes)
     render_semantic_passes(scene, camera, groups, output_root)
 
@@ -260,6 +321,7 @@ def main() -> None:
         "semantic_classes": SEMANTIC_CLASSES,
         "donor_reference_count": len(donors),
         "target_view_count": len(targets),
+        "rgb_validation": rgb_validation,
         "donor_references": [{**spec, "position": list(spec["position"])} for spec in donors],
         "target_views": [{**spec, "position": list(spec["position"])} for spec in targets],
         "modalities": [

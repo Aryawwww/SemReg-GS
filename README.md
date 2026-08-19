@@ -33,16 +33,16 @@ ScanNet++：验证真实建筑照片泛化
 - [x] **Step 2 — 获取一个 HSSD 场景**：已下载场景 `107734119_175999932` 到 `data/raw/hssd/`，并保存来源、许可和 SHA-256 清单。
 - [x] **Step 3 — 资产审计**：Blender 5.2 已成功导入场景；mesh、米制尺度、纹理/PBR 节点和官方对象类别映射均可读取，未映射模板暂归为 `other`。
 - [x] **Step 4 — 统一五类语义**：已映射为 `wall / floor / ceiling / door / window / other`，并保存可复现的逐面规则、`semantic_mapping.json` 和语义剖视预览。
-- [x] **Step 5 — 多视角渲染**：已完成单场景渲染管线 smoke test，固定几何输出 3 张 donor reference 和 8 张 target views；每个视角均包含 RGB、semantic mask、32-bit EXR depth/normal 和 camera JSON。
-- [x] **Step 6 — CAD-anchored Gaussians**：已完成 100,000 个 semantic Gaussians 的表面采样、标签继承、冻结参数导出、几何验证、中性外观 smoke 训练和双模式渲染验证。
+- [x] **Step 5 — 多视角渲染**：已修复 Blender compositor 污染 RGB 的问题；128×128 真实 smoke test 已输出 3 张 donor reference 和 8 张 target views，并通过 RGB、semantic、32-bit EXR depth/normal 和 camera JSON 验证。正式 512×512 数据需要用修复脚本重新生成。
+- [ ] **Step 6 — CAD-anchored Gaussians**：100,000 个 semantic Gaussians 的初始化、冻结几何验证和语义渲染已通过；修复后的中性灰初始化训练已在 128×128 有效 RGB 上通过快速复验，正式 512×512 一键训练尚待执行。
 - [ ] **Step 7 — 最小三方法比较**：在相同场景、相机和训练预算下运行 `Global`、`B_sem-2D`、`Semantic-DINO`。
 - [ ] **Step 8 — 完成 10 个 HSSD pair**：报告 region LPIPS/DINO、Semantic Leakage、multi-view error 和 CAD surface distance；不满足 Go/No-Go 判据时先修数据。
 - [ ] **Step 9 — 加入强 baseline**：依次运行 `StyleGaussian-global → MaterialMVP whole-room → MaterialMVP semantic-submesh → TRELLIS.2`。
 - [ ] **Step 10 — 扩大与验证**：3D-FRONT 获批后做 100–300 pairs；OpenRooms 做材质/光照消融；ScanNet++ 做真实域测试。
 
-### 当前 Smoke Test：实验设计与实际结果（2026-08-18）
+### 当前 Smoke Test：实验设计与实际结果（更新于 2026-08-19）
 
-这一节记录已经实际运行的实验，不是未来计划。当前完成的是 **Step 1–6 的单场景数据、Gaussian 初始化与渲染闭环**；尚未比较 Global、B_sem-2D 与 Semantic-DINO，因此当前结果只能证明数据管线和固定几何 smoke baseline 可用，不能证明论文假设成立。
+这一节记录已经实际运行的实验，不是未来计划。当前已完成 **Step 1–5 和 Step 6 的几何/语义部分**；修复后的 RGB 管线与中性外观训练已通过 128×128 快速复验，但正式 512×512 重渲染与复训尚未执行。尚未比较 Global、B_sem-2D 与 Semantic-DINO，因此当前结果只能证明数据、相机、几何、语义和低分辨率训练管线可用，不能证明论文假设成立。
 
 #### 本轮实验目的
 
@@ -143,7 +143,7 @@ ScanNet++：验证真实建筑照片泛化
 └── camera.json      # intrinsics + camera-to-world + world-to-camera
 ```
 
-Blender 5.2 修改了 compositor API。本项目使用新版 `CompositorNodeTree`、`directory/file_name` 和显式 `FLOAT Depth / VECTOR Normal` sockets 输出 EXR。RGB 与 geometry passes 分开渲染，避免 compositor 缺少主图输出造成黑帧；语义阶段解除 compositor 后使用 Workbench flat-material pass。
+Blender 5.2 修改了 compositor API。旧实现把 RGB 与 depth/normal compositor pass 交错执行，生成的 11 张 RGB 均退化为只有 0/1 的近黑图。修复后使用新版 `CompositorNodeTree`、`directory/file_name` 和显式 `FLOAT Depth / VECTOR Normal` sockets 输出 EXR；RGB、geometry 和 semantic 三类 pass 完全分离，RGB 从原始 `Render Result` 显式保存。脚本还会检查动态范围、8-bit 色阶数和跨视角 SHA-256，发现 0/1 图或全部视角相同时立即失败。
 
 #### 多视角渲染结果
 
@@ -152,12 +152,14 @@ Blender 5.2 修改了 compositor API。本项目使用新版 `CompositorNodeTree
 | Donor reference views | 3 / 3 完整 |
 | Target views | 8 / 8 完整 |
 | 每视角文件数 | 5 |
-| RGB 分辨率 | 512 × 512 |
+| 修复验证分辨率 | 128 × 128；正式 512 × 512 待重渲染 |
 | 相机矩阵 | 4 × 4 camera-to-world 与 world-to-camera |
 | EXR 文件头 | 有效 OpenEXR magic `762f3101` |
 | 完整视角数 | 11 / 11 |
-| RGB 非黑帧 | 已视觉检查通过 |
-| RGB–semantic 对齐 | 已在代表性视角视觉检查通过 |
+| RGB 自动验证 | `passed`；11 个视角具有 11 个不同 SHA-256 |
+| RGB 动态范围 | 10 个丰富视角为 165–230 个 8-bit 色阶；`view_04` 正对低纹理表面，为 5 个色阶但不是 0/1 图 |
+| RGB 非黑帧 | 修复后的 128×128 代表性视角已视觉检查通过 |
+| RGB–semantic 对齐 | 修复后的代表性视角已视觉检查通过 |
 
 语义 PNG 中约 76.8% 像素恰好等于六种类别 RGB，其余主要是抗锯齿边缘和黑色背景。训练前应执行 nearest-palette 解码，或额外输出关闭抗锯齿的单通道 class-ID mask；不能直接把所有非精确 RGB 当作新类别。
 
@@ -184,6 +186,18 @@ outputs/smoke/107734119_175999932/
     ├── render_manifest.json
     ├── donor_reference/reference_00..02/
     └── target_views/view_00..07/
+
+outputs/smoke/107734119_175999932/multiview_fix_test/
+├── rgb_validation.json
+├── render_manifest.json
+├── donor_reference/reference_00..02/
+└── target_views/view_00..07/
+
+outputs/smoke/107734119_175999932/neutral_gaussians_fix_test/
+├── appearance.npz
+├── checkpoint.pt
+├── training_report.json
+└── renders/view_00..07/
 ```
 
 关键脚本：
@@ -194,38 +208,44 @@ scripts/audit_hssd_blender.py
 scripts/audit_hssd_semantics.py
 scripts/create_semantic_mapping_blender.py
 scripts/render_hssd_multiview.py
+scripts/train_neutral_gaussians.py
+scripts/render_semantic_gaussians.py
+scripts/run_step6_fixed.cmd
 ```
 
 #### 当前结论
 
 **已支持的结论：**
 
-1. 本机环境可以完成 HSSD 单场景资产处理和 512×512 多模态渲染；
+1. 本机环境可以完成 HSSD 单场景资产处理；修复后的多模态渲染已在 128×128 验证通过，512×512 正式重渲染待执行；
 2. HSSD 场景具备可读取的几何、PBR 资源、对象实例和可统一的建筑语义；
-3. 六类映射与 RGB/semantic/depth/normal/camera 同步输出闭环已跑通；
-4. 当前数据可以进入 CAD-anchored Gaussian 初始化阶段。
+3. 六类映射与 RGB/semantic/depth/normal/camera 同步输出闭环已跑通，RGB 退化问题现在可被自动检测；
+4. CAD-anchored Gaussian 初始化与几何保持验证已通过；修复后的训练器能够在有效 RGB 上从中性灰收敛，并保持几何参数冻结。
 
 **尚不支持的结论：**
 
 1. 尚未证明 semantic conditioning 优于 global conditioning；
 2. 尚未测量 Semantic Leakage、region LPIPS/DINO 或 multi-view warp error；
-3. 尚未证明 Gaussian center 到 CAD surface 的距离接近零；
+3. 尚未在正式 512×512 有效 RGB 上完成中性外观训练与指标复验；
 4. 尚未完成不同几何的 donor–target pair；
 5. 尚未与 StyleGaussian、MaterialMVP 或 TRELLIS.2 比较。
 
-因此当前里程碑是 **data/rendering/fixed-geometry Gaussian smoke pipeline passed**，不是 **SemReg-GS method validated**。
+因此当前里程碑是 **data/camera/geometry/semantic pipeline passed; fixed-RGB low-resolution training passed**。正式 512×512 外观复训仍待完成，更不是 **SemReg-GS method validated**。
 
 #### Step 6 实际结果
 
 - 从 target mesh 按三角面面积采样并导出了 100,000 个 Gaussian；六类计数为 wall 40,102、floor 9,505、ceiling 7,651、door 6,224、window 268、other 36,250。
 - `semantic_id` 与 `source_face_id` 验证通过；Gaussian center 到来源三角面的最大重建误差为 `1.134145e-6 m`，低于 `1e-5 m` 阈值。
-- 中性外观 smoke 训练使用 8 个 target views，仅优化 RGB/SH-DC，冻结 xyz、normal、rotation、scale 和 semantic ID；覆盖 83,113 / 100,000 个 Gaussian（83.11%），300 步 L1 从 `8.788e-5` 降至 `5.689e-5`。
+- 旧中性外观 smoke 训练使用 8 个 target views，仅优化 RGB/SH-DC，冻结 xyz、normal、rotation、scale 和 semantic ID；程序覆盖 83,113 / 100,000 个 Gaussian（83.11%），但输入 RGB 只有 0/1，因此 `8.788e-5 → 5.689e-5` 的 L1 下降无外观质量意义，不能作为有效实验结果。
 - 外观与语义双模式渲染成功输出 8 个视角；固定半径点投影的像素覆盖率为 12.52%–50.60%，语义空间结构与相机方向一致。
-- 当前实现是便携式 point-zbuffer smoke baseline，不是各向异性 CUDA Gaussian rasterizer。当前 `target_views/*/rgb.png` 的像素值仅为 0/1，因此外观图接近黑色；进入正式 3DGS 训练前必须修正上游 RGB 导出范围。
+- 当前实现是便携式 point-zbuffer smoke baseline，不是各向异性 CUDA Gaussian rasterizer。RGB 导出代码已经修复：128×128 测试的 11 个视角具有 11 个不同哈希，丰富视角包含 165–230 个 8-bit 色阶，RGB、depth、normal 和 semantic 均成功输出。
+- 训练器已修复另一个实验有效性问题：旧实现直接用目标 RGB 初始化参数，导致初始 loss 虚低；新实现固定从 `RGB=0.5` 中性灰开始，只优化 RGB/SH-DC，并在训练前检查 0/1 图、重复哈希、相机尺寸和最低 Gaussian 覆盖率。
+- 修复后的 128×128 快速复训使用 8 个 target views 和 CUDA，观察到 53,623 / 100,000 个 Gaussian（53.62%）。100 步训练将 L1 从 `0.268841` 降至 `0.001578`，最终 MSE 为 `1.95285e-5`、PSNR 为 `47.09 dB`；随后 8 个外观/语义视角均成功渲染。该结果验证训练代码正确性，但不是正式 512×512 结果，也不是独立测试集泛化指标。
+- `scripts/run_step6_fixed.cmd` 已封装 Anaconda 环境激活、512×512 多模态重渲染、RGB 验证、300 步中性外观训练和双模式渲染；任何阶段失败都会停止，防止无效数据继续进入训练。
 
 #### 下一实验
 
-下一步执行 Step 7：先修正 RGB 导出并复验中性外观，然后在相同 Gaussian、相机和预算下实现 `Global`、`B_sem-2D` 与 `Semantic-DINO` 三方法比较。
+运行 `scripts/run_step6_fixed.cmd`，重新生成 512×512 `multiview/`，确认 `rgb_validation.json` 为 `passed`，并将正式中性外观输出到 `neutral_gaussians_fixed/`。检查正式训练的覆盖率、初始/最终 L1、MSE、PSNR 和代表性渲染；全部通过后将 Step 6 标记完成，再进入 Step 7 的 `Global`、`B_sem-2D` 与 `Semantic-DINO` 三方法比较。
 
 ### Step 1–8 的最小完成产物
 
