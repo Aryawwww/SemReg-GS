@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
 import torch
 from PIL import Image
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def arguments() -> argparse.Namespace:
@@ -21,7 +25,37 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--mode", choices=("appearance", "semantic", "both"), default="both")
     parser.add_argument("--point-radius", type=int, default=1)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--protocol-manifest", type=Path)
+    parser.add_argument(
+        "--protocol-split",
+        choices=("target_train", "target_heldout", "target_consistency"),
+        default="target_heldout",
+    )
     return parser.parse_args()
+
+
+def protocol_view_directories(protocol_path: Path, views_root: Path, split: str) -> tuple[list[Path], str]:
+    protocol = json.loads(protocol_path.resolve().read_text(encoding="utf-8"))
+    if protocol.get("status") != "frozen":
+        raise RuntimeError("cross-geometry protocol is not frozen")
+    names = protocol["selection"][split]
+    records = {
+        (record["view"], record["modality"]): record
+        for record in protocol["files"]
+        if record["split"] == split
+    }
+    directories = []
+    for name in names:
+        directory = views_root / name
+        camera = directory / "camera.json"
+        record = records.get((name, "camera.json"))
+        if record is None or not camera.is_file():
+            raise RuntimeError(f"frozen camera is missing: {name}/camera.json")
+        digest = hashlib.sha256(camera.read_bytes()).hexdigest()
+        if camera.stat().st_size != record["bytes"] or digest != record["sha256"]:
+            raise RuntimeError(f"frozen camera differs from protocol: {name}/camera.json")
+        directories.append(directory)
+    return directories, protocol["pair_id"]
 
 
 def project(xyz: torch.Tensor, camera: dict, device: torch.device):
@@ -41,7 +75,7 @@ def rasterize(
     camera: dict,
     radius: int,
     device: torch.device,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, float]:
     width, height = int(camera["width"]), int(camera["height"])
     u, v, depth = project(xyz, camera, device)
     base_x = torch.round(u).long()
@@ -71,7 +105,8 @@ def rasterize(
     image[pixel_ids] = colors[expanded_source]
     covered = torch.isfinite(zbuffer)
     result = image.reshape(height, width, 3).clamp(0, 1).cpu().numpy()
-    return np.rint(result * 255.0).astype(np.uint8), float(covered.float().mean().cpu())
+    mask = covered.reshape(height, width).cpu().numpy().astype(np.uint8) * 255
+    return np.rint(result * 255.0).astype(np.uint8), mask, float(covered.float().mean().cpu())
 
 
 def main() -> None:
@@ -86,7 +121,14 @@ def main() -> None:
     for spec in mapping["classes"].values():
         palette[int(spec["id"])] = np.asarray(spec["color"][:3], dtype=np.float32)
     semantic_colors = torch.from_numpy(palette[gaussians["semantic_id"]]).to(device)
-    view_directories = sorted(path for path in args.views.resolve().iterdir() if path.is_dir())
+    views_root = args.views.resolve()
+    pair_id = None
+    if args.protocol_manifest:
+        view_directories, pair_id = protocol_view_directories(
+            args.protocol_manifest, views_root, args.protocol_split
+        )
+    else:
+        view_directories = sorted(path for path in views_root.iterdir() if path.is_dir())
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     reports = []
@@ -95,19 +137,26 @@ def main() -> None:
         view_output = output / view_directory.name
         view_output.mkdir(parents=True, exist_ok=True)
         entry = {"view": view_directory.name}
+        coverage_mask = None
         if args.mode in ("appearance", "both"):
-            image, coverage = rasterize(xyz, appearance_colors, camera, args.point_radius, device)
+            image, coverage_mask, coverage = rasterize(xyz, appearance_colors, camera, args.point_radius, device)
             Image.fromarray(image).save(view_output / "appearance.png")
             entry["appearance_coverage"] = coverage
         if args.mode in ("semantic", "both"):
-            image, coverage = rasterize(xyz, semantic_colors, camera, args.point_radius, device)
+            image, semantic_mask, coverage = rasterize(xyz, semantic_colors, camera, args.point_radius, device)
             Image.fromarray(image).save(view_output / "semantic.png")
             entry["semantic_coverage"] = coverage
+            if coverage_mask is None:
+                coverage_mask = semantic_mask
+        Image.fromarray(coverage_mask).save(view_output / "coverage.png")
         (view_output / "camera.json").write_text(
             json.dumps(camera, indent=2) + "\n", encoding="utf-8"
         )
         reports.append(entry)
     report = {
+        "pair_id": pair_id,
+        "protocol_manifest": str(args.protocol_manifest.resolve()) if args.protocol_manifest else None,
+        "protocol_split": args.protocol_split if args.protocol_manifest else None,
         "renderer": "portable point-zbuffer smoke renderer",
         "device": str(device),
         "point_radius": args.point_radius,

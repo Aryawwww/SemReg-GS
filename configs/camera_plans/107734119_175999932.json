@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "scene_id": "107734119_175999932",
+  "expected_rooms": ["living room", "hallway", "utilityroom", "bedroom", "bathroom", "closet", "kitchen"],
+  "donor_references": [
+    {"name": "reference_00", "room": "living room", "yaw": 205.0},
+    {"name": "reference_01", "room": "bedroom", "yaw": 35.0},
+    {"name": "reference_02", "room": "kitchen", "yaw": 145.0}
+  ],
+  "target_views": [
+    {"name": "view_00", "room": "living room", "yaw": 25.0},
+    {"name": "view_01", "room": "living room", "yaw": 205.0},
+    {"name": "view_02", "room": "bedroom", "yaw": 35.0},
+    {"name": "view_03", "room": "kitchen", "yaw": 145.0},
+    {"name": "view_04", "room": "hallway", "yaw": 90.0},
+    {"name": "view_05", "room": "hallway", "yaw": 270.0},
+    {"name": "view_06", "room": "bathroom", "yaw": 135.0},
+    {"name": "view_07", "room": "utilityroom", "yaw": 315.0}
+  ]
+}

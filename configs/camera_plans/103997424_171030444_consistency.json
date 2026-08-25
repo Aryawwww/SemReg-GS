@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "scene_id": "103997424_171030444",
+  "purpose": "overlapping multi-view consistency evaluation only",
+  "expected_rooms": ["living room", "kitchen", "bathroom", "bedroom", "office", "hallway", "dining room"],
+  "donor_references": [],
+  "target_views": [
+    {
+      "name": "consistency_00",
+      "room": "living room",
+      "position": [-16.35, 13.54, 1.5],
+      "yaw": 25.0
+    },
+    {
+      "name": "consistency_01",
+      "room": "living room",
+      "position": [-16.10, 13.79, 1.5],
+      "yaw": 35.0
+    }
+  ]
+}

@@ -28,9 +28,15 @@ def arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--semantic-config", type=Path, required=True)
+    parser.add_argument("--camera-plan", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--width", type=int, default=512)
     parser.add_argument("--height", type=int, default=512)
+    parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Validate and write the resolved camera manifest without importing or rendering the scene.",
+    )
     return parser.parse_args(argv)
 
 
@@ -62,36 +68,91 @@ def point_inside_room(region: dict) -> Vector:
     return Vector((x, y, 1.50))
 
 
-def camera_specifications(regions: list[dict]) -> tuple[list[dict], list[dict]]:
-    by_name = {region["name"]: region for region in regions}
-    donor_rooms = ["living room", "bedroom", "kitchen"]
-    donor_yaws = [205.0, 35.0, 145.0]
-    donors = [
-        {"name": f"reference_{index:02d}", "room": room, "position": point_inside_room(by_name[room]), "yaw": yaw}
-        for index, (room, yaw) in enumerate(zip(donor_rooms, donor_yaws))
-    ]
+def camera_specifications(regions: list[dict], plan: dict) -> tuple[list[dict], list[dict]]:
+    """Resolve an explicit scene plan; never substitute a missing room silently."""
+    by_name: dict[str, list[dict]] = {}
+    for region in regions:
+        by_name.setdefault(region["name"], []).append(region)
 
-    target_plan = [
-        ("living room", 25.0),
-        ("living room", 205.0),
-        ("bedroom", 35.0),
-        ("kitchen", 145.0),
-        ("hallway", 90.0),
-        ("hallway", 270.0),
-        ("bathroom", 135.0),
-        ("utilityroom", 315.0),
-    ]
-    targets = [
-        {"name": f"view_{index:02d}", "room": room, "position": point_inside_room(by_name[room]), "yaw": yaw}
-        for index, (room, yaw) in enumerate(target_plan)
-    ]
+    actual_rooms = set(by_name)
+    expected_rooms = set(plan.get("expected_rooms", []))
+    if not expected_rooms:
+        raise ValueError("camera plan must declare a non-empty expected_rooms list")
+    if actual_rooms != expected_rooms:
+        missing = sorted(expected_rooms - actual_rooms)
+        unexpected = sorted(actual_rooms - expected_rooms)
+        raise ValueError(
+            f"camera plan room mismatch; missing={missing}, unexpected={unexpected}. "
+            "Update the scene-specific plan explicitly; rooms are not substituted."
+        )
+    duplicates = sorted(name for name, matches in by_name.items() if len(matches) != 1)
+    if duplicates:
+        raise ValueError(f"camera planning requires unique region names; duplicates={duplicates}")
+
+    seen_names: set[str] = set()
+
+    def resolve(group: str) -> list[dict]:
+        resolved = []
+        for index, raw in enumerate(plan.get(group, [])):
+            name = raw.get("name")
+            room = raw.get("room")
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"{group}[{index}] has no valid name")
+            if name in seen_names:
+                raise ValueError(f"duplicate camera name: {name}")
+            seen_names.add(name)
+            if room not in by_name:
+                raise ValueError(f"{group}/{name} requests absent room {room!r}")
+            has_yaw = "yaw" in raw
+            has_target = "target" in raw
+            if has_yaw == has_target:
+                raise ValueError(f"{group}/{name} must define exactly one of yaw or target")
+            spec = dict(raw)
+            spec["position"] = Vector(raw["position"]) if "position" in raw else point_inside_room(by_name[room][0])
+            resolved.append(spec)
+        return resolved
+
+    donors = resolve("donor_references")
+    targets = resolve("target_views")
+    if not targets:
+        raise ValueError("camera plan must contain at least one target view")
     return donors, targets
+
+
+def serializable_specs(specs: list[dict]) -> list[dict]:
+    return [{**spec, "position": list(spec["position"])} for spec in specs]
+
+
+def write_camera_plan_manifest(
+    output_root: Path,
+    camera_plan_path: Path,
+    plan: dict,
+    donors: list[dict],
+    targets: list[dict],
+) -> Path:
+    plan_bytes = camera_plan_path.read_bytes()
+    manifest = {
+        "schema_version": 1,
+        "scene_id": plan.get("scene_id"),
+        "camera_plan": str(camera_plan_path.resolve()),
+        "camera_plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+        "expected_rooms": plan["expected_rooms"],
+        "donor_references": serializable_specs(donors),
+        "target_views": serializable_specs(targets),
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    path = output_root / "camera_plan_manifest.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return path
 
 
 def configure_camera(camera: bpy.types.Object, spec: dict) -> None:
     camera.location = spec["position"]
-    yaw = math.radians(spec["yaw"])
-    target = camera.location + Vector((math.cos(yaw), math.sin(yaw), -0.08))
+    if "target" in spec:
+        target = Vector(spec["target"])
+    else:
+        yaw = math.radians(spec["yaw"])
+        target = camera.location + Vector((math.cos(yaw), math.sin(yaw), -0.08))
     camera.rotation_euler = (target - camera.location).to_track_quat("-Z", "Y").to_euler()
 
 
@@ -275,12 +336,28 @@ def render_semantic_passes(
 def main() -> None:
     args = arguments()
     output_root = args.output.resolve()
+    semantic_config = json.loads(args.semantic_config.read_text(encoding="utf-8"))
+    camera_plan = json.loads(args.camera_plan.read_text(encoding="utf-8"))
+    scene_id = camera_plan.get("scene_id")
+    if not isinstance(scene_id, str) or not scene_id:
+        raise ValueError("camera plan must declare a non-empty scene_id")
+    input_scene_id = args.input.resolve().parent.name
+    if scene_id != input_scene_id:
+        raise ValueError(
+            f"camera plan scene_id {scene_id!r} does not match input scene directory {input_scene_id!r}"
+        )
+    donors, targets = camera_specifications(semantic_config["region_annotations"], camera_plan)
+    plan_manifest_path = write_camera_plan_manifest(
+        output_root, args.camera_plan, camera_plan, donors, targets
+    )
+    if args.plan_only:
+        print(json.dumps({"status": "plan_validated", "manifest": str(plan_manifest_path)}))
+        return
+
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.import_scene.gltf(filepath=str(args.input.resolve()))
     meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH"]
 
-    semantic_config = json.loads(args.semantic_config.read_text(encoding="utf-8"))
-    donors, targets = camera_specifications(semantic_config["region_annotations"])
     groups = [("donor_reference", donors), ("target_views", targets)]
 
     camera_data = bpy.data.cameras.new("RenderCamera")
@@ -317,13 +394,16 @@ def main() -> None:
 
     manifest = {
         "source_scene": str(args.input.resolve()),
+        "scene_id": scene_id,
+        "camera_plan_manifest": str(plan_manifest_path),
+        "camera_plan_sha256": hashlib.sha256(args.camera_plan.read_bytes()).hexdigest(),
         "resolution": [args.width, args.height],
         "semantic_classes": SEMANTIC_CLASSES,
         "donor_reference_count": len(donors),
         "target_view_count": len(targets),
         "rgb_validation": rgb_validation,
-        "donor_references": [{**spec, "position": list(spec["position"])} for spec in donors],
-        "target_views": [{**spec, "position": list(spec["position"])} for spec in targets],
+        "donor_references": serializable_specs(donors),
+        "target_views": serializable_specs(targets),
         "modalities": [
             "rgb.png",
             "semantic.png",
