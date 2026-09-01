@@ -27,7 +27,8 @@ rasterizer。单个 source→target pair 的 cross-geometry pilot 已跑通 Glob
 | Target CAD Gaussians | 完成 | 100,000 Gaussians，六类齐全；最大锚定误差 `2.049921e-6 m`，几何字段冻结 |
 | Cross-geometry 2D transfer | 完成（单 pair pilot） | Global 与 B_sem-2D 已在 `view_00/view_07` 评估；B_sem-2D leakage 降低 17.21 个百分点，但 PSNR 下降 0.87 dB |
 | Multi-view consistency | 完成（单 pair pilot） | 独立 living-room 重叠视角已冻结；5,828 个双向对应点；B_sem-2D warp L1 `0.02858` |
-| Source-only DINO | 代码完成、未运行 | donor-only ridge decoder 与评估入口已实现；因原 PyTorch Conda 环境缺失尚无正式结果 |
+| Source-only DINO | 完成（单 pair pilot） | donor-only ridge decoder 已运行；3 donor、4,078 patches、六类均有样本，`target_rgb_accessed=false`；四方法汇总已生成 |
+| Shared-palette leakage | 完成（单 pair pilot） | 方法无关 donor palette 已冻结；Global/Global-DINO 均为 47.40%，B_sem-2D/Semantic-DINO 均为 30.19%，修复了旧指标跨方法不可比问题 |
 | 强 baseline 和多 pair | 未完成 | StyleGaussian、MaterialMVP、TRELLIS.2、10 pairs 均未运行 |
 
 ## 已完成实验及结果
@@ -144,16 +145,113 @@ Global 是全场常量颜色，warp error 天然为 0；该结果只表示跨视
 视觉质量最好。B_sem-2D 的非零误差主要来自语义边界、离散 point coverage 和最近邻
 重投影，需在正式 Gaussian rasterizer 中复核。
 
-### 9. Source-only DINO 当前状态
+### 9. Source-only DINO 四方法 pilot
 
-旧 `train_dino_gaussian_decoder.py` 使用 target train RGB 监督 decoder，不符合当前
-冻结协议，因此旧 Global-DINO/Semantic-DINO 不能作为正式 cross-geometry 结果。
+旧 target-supervised DINO 训练代码与单场景 Step 7 入口已删除；它们不符合当前冻结协议，
+不能作为正式 cross-geometry 结果。
 
-新的 `build_source_only_dino.py` 已实现：仅使用冻结 source donor 的 DINO patch token
+新的 `build_source_only_dino.py` 已运行：仅使用冻结 source donor 的 DINO patch token
 与 donor RGB 拟合 ridge RGB decoder，再以 global/class DINO code 为 target Gaussians
-赋色；代码显式记录 `target_rgb_accessed: false`，并接入 held-out 与 consistency 评估。
-本机已有 `facebookresearch_dinov2_main` 和 `dinov2_vits14_pretrain.pth` 缓存，但原
-`semreg-gs-v1` Conda 环境已不存在，现存 `semreg-gs` 又没有 PyTorch，所以该步骤尚未运行。
+赋色。运行使用 `dinov2_vits14`、384 维特征、ridge `0.01`，共 4,078 个有效 patch；
+wall/floor/ceiling/door/window/other 分别为 1,051/133/624/574/807/889，无缺失类回退。
+DINO 权重 SHA-256 为
+`b938bf1bc15cd2ec0feacfe3a1bb553fe8ea9ca46a7e1d8d00217f29aef60cd9`，报告明确记录
+`target_rgb_accessed: false`。
+
+协议锁定的四方法结果如下；held-out 指标均基于 point renderer 覆盖的 52,126 pixels，
+warp 均基于 5,828 个双向对应点。
+
+| 方法 | L1 ↓ | PSNR ↑ | 当前代理 leakage* ↓ | Warp L1 ↓ |
+|---|---:|---:|---:|---:|
+| Global | 0.25652 | **10.80 dB** | 47.40% | 0.00000 |
+| B_sem-2D | 0.25953 | 9.93 dB | 30.19% | 0.02858 |
+| Global-DINO | 0.25652 | **10.80 dB** | 72.18% | 0.00000 |
+| Semantic-DINO | **0.25615** | 10.09 dB | 30.19% | **0.02496** |
+
+Semantic-DINO 相对 Global-DINO 的 L1 仅改善 `0.00038`，PSNR 反而下降 `0.71 dB`；
+相对 B_sem-2D，L1 改善 `0.00338`、PSNR 提高 `0.16 dB`、warp L1 降低 `0.00362`。
+这些差异来自单 pair、低覆盖 point-zbuffer pilot，尚不足以证明 learned DINO feature
+优于简单 semantic prototype。
+
+`*` 上表中的旧 method-specific leakage 不能跨方法解释：它将每个方法的预测 RGB 与该方法自己的 donor class
+prototype 比较。Global 与 Global-DINO 的 held-out L1/PSNR 完全相同，却分别得到 47.40%
+与 72.18% leakage，说明该数值受到 prototype 定义影响；Semantic-2D 与 Semantic-DINO
+恰好同为 30.19% 也不代表两者 controllability 相同。在冻结方法无关的 reference palette
+或实施单区域干预测试前，不再用该 leakage 排名方法或判断 Gate B。
+
+### 10. Shared-palette leakage 复核
+
+Step 18 从协议冻结的 3 个 source donor 生成唯一 reference palette，四方法共享该 palette。
+协议与 donor 哈希校验通过，且 `target_rgb_accessed=false`。
+
+| 方法 | Micro leakage ↓ | Macro leakage ↓ |
+|---|---:|---:|
+| Global | 47.40% | 83.33% |
+| Global-DINO | 47.40% | 83.33% |
+| B_sem-2D | **30.19%** | **15.86%** |
+| Semantic-DINO | **30.19%** | **15.86%** |
+
+修正后 Global 与 Global-DINO 完全一致，证明旧 72.18% Global-DINO leakage 是
+method-specific prototype 造成的评估伪差异。两个 semantic 方法的 confusion matrix
+逐元素完全相同；其主要错误来自 `other`（51.93%）、door（22.08%）和 window（11.00%）。
+原因不是 DINO 没有提取到特征，而是当前 Semantic-DINO 最终只解码每类一个 RGB，和
+B_sem-2D 一样是 class-constant 表示；DINO 的类内信息在求均值时被丢弃。因此当前实现
+只能证明 semantic class selector 的区域隔离价值，不能证明 learned feature 的必要性。
+
+下一步先运行 Step 19 的单类别干预，直接测 target response、non-target spill 与
+selectivity。若 semantic 方法相对 global 方法没有明显 spill 优势，应先修复 renderer
+边界/标签；若有优势，再设计保留类内变化的 multi-prototype 或 spatial decoder，避免
+继续比较两个本质上都是 class-constant 的方法。
+
+### 11. Semantic intervention 结果
+
+Step 19 对六类分别施加固定 RGB edit。Global 方法没有 class selector，因此请求任一类
+编辑都会改变全部 Gaussians；semantic 方法只改变对应 `semantic_id`。
+
+| 方法 | Target response L1 ↑ | Non-target spill L1 ↓ | Selectivity ↑ |
+|---|---:|---:|---:|
+| Global | 0.14902 | 0.14902 | 0.5000 |
+| Global-DINO | 0.15033 | 0.15033 | 0.5000 |
+| B_sem-2D | 0.12569 | **0.00979** | 0.9422 |
+| Semantic-DINO | 0.12602 | 0.00979 | **0.9422** |
+
+semantic selector 将平均非目标串扰降低约 93.5%，支持区域可控性的机制性结论；两个
+semantic 方法仍无实质差异。wall 是明显异常类：spill `0.04487`、selectivity `0.7641`，
+而 ceiling/window 的 selectivity 均超过 `0.995`。下一步用 Step 20 在 0/2/4/8/16 px
+边界腐蚀下复算指标；若 wall spill 随 margin 快速下降，主要原因是 point splat、proxy
+semantic 与可见表面边界错位，而不是区域内部 appearance 污染。
+
+### 12. Boundary sensitivity 结果
+
+Step 20 已完成。wall spill 从 margin 0 的 `0.04487` 到 margin 16 的 `0.04411`，仅下降
+`1.7%`，selectivity 仍为 `0.7716`；因此 wall 问题不是普通的几像素边界污染。
+相对地，ceiling/window/other 的 spill 在 16 px 时分别下降 `93.3% / 84.8% / 100%`，
+符合边界误差特征。floor spill 从 `0.00765` 增至 `0.01296`，说明错误集中在腐蚀后仍
+保留的内部区域。两个 semantic 方法的完整曲线继续一致。
+
+该结果将原因收窄到 target CAD Gaussian `semantic_id` 与 held-out ray-cast proxy semantic
+之间的区域级不一致，尤其可能是结构 wall 与 `other` 家具/遮挡面、floor 可见面之间的
+标签定义或可见性差异。下一步 Step 21 直接比较 rendered semantic ID 与 held-out proxy，
+输出 target→rendered confusion、逐类 precision/recall/IoU、逐视角结果和 mismatch heatmap；
+在定位具体混淆方向前不应修改 appearance decoder。
+
+### 13. Semantic alignment audit 结果
+
+Step 21 在 52,126 个 point-renderer covered pixels 上得到总体 agreement `69.81%`；
+`view_00` 为 `78.82%`，`view_07` 仅 `40.24%`。最大混淆是 target proxy `other`
+被 rendered Gaussian 标为 `wall`（10,810 pixels）与 `floor`（2,609 pixels）。其中
+`view_07` 单独贡献 6,261 个 `other→wall` pixels。
+
+wall recall 为 `97.55%`，但 precision 仅 `55.53%`；floor recall 为 `92.59%`，precision
+仅 `24.02%`。这说明 wall/floor 并非没有覆盖自身 target region，而是 CAD semantic
+surface 大量落在 proxy 定义的 `other` 区域。ceiling/window IoU 分别为 `95.25% / 85.56%`，
+说明其标签定义相对一致。mismatch heatmap 也显示 `view_07` 是大面积内部不一致，不是边缘带。
+
+因此 proxy-based intervention spill 同时混合了两件事：表示本身是否跨 semantic_id 修改，
+以及 rendered CAD semantic 是否同意 held-out proxy label。Step 22 将两者分解：以 rendered
+semantic ID 计算 intrinsic spill，同时统计 proxy apparent spill 中有多少变化恰好位于
+`rendered=edited class, proxy!=edited class`。只有 intrinsic spill 才直接衡量表示的区域隔离；
+proxy disagreement 应作为数据/标签对齐指标单独报告。
 
 ## 已运行但未形成完整实验的内容
 
@@ -180,8 +278,8 @@ Global 是全场常量颜色，warp error 天然为 0；该结果只表示跨视
 
 ## 尚未完成
 
-1. 恢复包含 PyTorch/CUDA 的 `semreg-gs-v1` 或等价环境，运行 source-only
-   Global-DINO 与 Semantic-DINO；不能使用旧 target-supervised DINO 结果替代。
+1. 修正并冻结方法无关的 leakage/controllability protocol：统一 reference prototype，
+   并加入“只改变一个 semantic donor，测量目标类响应与非目标类串扰”的 intervention 指标。
 2. 加入 region LPIPS 与 evaluation-only region DINO 指标，并冻结模型版本、权重哈希、
    resize/crop 和 mask aggregation 规则。
 3. 将 point-zbuffer baseline 替换或补充为正式各向异性 CUDA Gaussian rasterizer，
@@ -197,20 +295,22 @@ Global 是全场常量颜色，warp error 天然为 0；该结果只表示跨视
 scene-aware 相机、多模态渲染、coverage audit、协议冻结和 target CAD Gaussians 均已完成。
 主 held-out 和额外 consistency views 使用不同用途字段，不允许混入训练。
 
-### Step D — 完成 source-only 四方法比较
+### Step D — Source-only 四方法比较（已完成）
 
-Global 与 B_sem-2D 已完成。下一项是恢复 PyTorch 环境后运行：
+Global、B_sem-2D、Global-DINO 与 Semantic-DINO 已完成并汇总到：
 
-```bat
-scripts\run_step17_source_only_dino.cmd
+```text
+outputs/pairs/107734119_175999932__to__103997424_171030444/pilot_four_method_metrics.json
 ```
 
-该入口不得读取 target RGB；完成后将 DINO 的 held-out L1/PSNR/leakage 与 consistency
-warp 指标和 2D 两方法合并成同一 pilot 表。
+该结果通过 source-donor-only 与 `target_rgb_accessed=false` 检查，但当前 leakage 定义
+未通过跨方法可比性审计，因此四方法比较只可引用 L1/PSNR/warp，并注明 point renderer
+覆盖限制。
 
-### Step E — 感知指标与正式 rasterizer
+### Step E — 先修正 controllability 指标，再加入感知指标
 
-冻结 LPIPS/DINO evaluation protocol，并迁移到正式各向异性 Gaussian rasterizer。
+先冻结方法无关的 leakage 与 semantic intervention protocol；随后冻结 LPIPS/DINO
+evaluation protocol，并迁移到正式各向异性 Gaussian rasterizer。
 Global 的常量颜色 warp=0 必须和 held-out 视觉误差共同解释，不能单独作为方法优势。
 
 ### Step F — 扩展与统计
@@ -223,8 +323,6 @@ DINO/LPIPS、leakage、multi-view consistency 和 geometry preservation，不能
 
 ```text
 scripts/run_step6_fixed.cmd           原始 3/8 source smoke pipeline
-scripts/run_step7_baselines.cmd       Global 与 B_sem-2D（默认扫描整个目录，正式实验慎用）
-scripts/run_step7_dino.cmd            原始单场景 DINO smoke comparison
 scripts/run_step8_window_views.cmd    window-targeted cameras 与 coverage audit
 scripts/run_step8_prepare_pair.cmd    冻结 source split并选择第二场景
 scripts/run_step9_target_audit.cmd    target 资产与语义审计
@@ -234,7 +332,13 @@ scripts/run_step12_cross_geometry_2d.cmd      source-only Global/B_sem-2D 迁移
 scripts/run_step13_evaluate_cross_geometry_2d.cmd  held-out L1/PSNR/leakage/geometry 评估
 scripts/run_step15_consistency_views.cmd      独立重叠 consistency views 与 protocol v2
 scripts/run_step16_consistency_warp.cmd       双向 depth/camera warp consistency
-scripts/run_step17_source_only_dino.cmd       donor-only DINO 两方法（待恢复 PyTorch 环境）
+scripts/run_step17_source_only_dino.cmd       donor-only DINO 两方法、评估及四方法汇总（已运行）
+scripts/merge_cross_geometry_pilot.py         四方法协议校验与 held-out/warp 汇总
+scripts/run_step18_shared_palette_leakage.cmd 方法共享的冻结 donor palette 与 leakage 重评估
+scripts/run_step19_semantic_interventions.cmd 单类别编辑的 target response/non-target spill 评估
+scripts/run_step20_boundary_sensitivity.cmd   semantic intervention 的边界腐蚀敏感性评估
+scripts/run_step21_semantic_alignment_audit.cmd rendered Gaussian semantic 与 held-out proxy 对齐审计
+scripts/run_step22_spill_decomposition.cmd     intrinsic spill 与 proxy-label apparent spill 分解
 
 outputs/smoke/107734119_175999932/    source smoke 与历史结果
 data/splits/107734119_175999932_split.json
@@ -244,6 +348,9 @@ data/processed/pairs/107734119_175999932__to__103997424_171030444/protocol_consi
 data/processed/semantic_gaussians/103997424_171030444/validation.json
 outputs/pairs/107734119_175999932__to__103997424_171030444/cross_geometry_2d/metrics.json
 outputs/pairs/107734119_175999932__to__103997424_171030444/cross_geometry_2d/consistency_warp_metrics.json
+outputs/pairs/107734119_175999932__to__103997424_171030444/cross_geometry_dino/metrics.json
+outputs/pairs/107734119_175999932__to__103997424_171030444/cross_geometry_dino/consistency_warp_metrics.json
+outputs/pairs/107734119_175999932__to__103997424_171030444/pilot_four_method_metrics.json
 ```
 
 `pair_manifest.json` 的旧状态字段仍为 `audited_pending_multiview_render`，但后续不可变

@@ -78,15 +78,28 @@ outputs/stage1/<pair_id>/
 
 ### WP2：关键假设实验
 
+状态：单 pair 四方法 point-zbuffer pilot 已完成；当前 leakage 定义未通过跨方法可比性审计，Gate B 尚未通过。
+
 预计：5–7 个工作日。
 
 实现顺序：
 
-1. `Global-RGB`：全局 mean/std 或 histogram；
-2. `B_sem-2D`：每类 mean/std、histogram、简单 texture descriptor；
-3. `Global-DINO`：一个全局 DINO token；
-4. `Semantic-DINO`：每类一个 DINO token；
+1. [x] `Global-RGB`：全局 mean/std 或 histogram；
+2. [x] `B_sem-2D`：每类 mean/std、histogram、简单 texture descriptor；
+3. [x] `Global-DINO`：一个全局 DINO token；
+4. [x] `Semantic-DINO`：每类一个 DINO token；
 5. 保持 renderer、decoder、训练视角、步数和 loss 一致。
+
+进入多 pair 前必须完成：
+
+- [ ] 用所有方法共享的冻结 reference palette 重算 leakage；
+- [x] 完成 semantic intervention：semantic macro selectivity 约 0.942，global 约 0.500；
+- [x] 完成边界腐蚀敏感性评估：wall spill 在 16 px 仅下降 1.7%，属于区域内部语义不一致；
+- [x] 实现 rendered Gaussian semantic 与 held-out proxy semantic 的 confusion/IoU 审计（待运行）；
+- [x] 完成 semantic alignment audit：overall agreement 69.81%，view_07 仅 40.24%，主要为 other→wall/floor；
+- [x] 实现 intrinsic spill 与 proxy-label apparent spill 分解（待运行）；
+- [ ] 冻结 evaluation-only Region DINO/LPIPS 的模型、权重哈希、预处理和 mask aggregation；
+- [ ] 用正式 Gaussian rasterizer 复核低覆盖 point-zbuffer 结果。
 
 先运行 1 pair，之后扩展到 10 pairs。每个方法必须保存固定相机路径和相同评估 masks。
 
@@ -178,7 +191,9 @@ MaterialMVP 优先级高于 TRELLIS.2。
 
 ### Gate B：语义假设
 
-通过条件：Semantic 相对 Global 降低 leakage、提高 region similarity，且配对场景趋势稳定。
+通过条件：在方法无关的冻结指标上，Semantic 相对 Global 降低 intervention spill、提高
+target-region response 与 region similarity，且跨配对场景趋势稳定。当前 method-specific
+nearest-prototype leakage 不用于 Gate B 判定。
 
 ### Gate C：学习模型必要性
 
