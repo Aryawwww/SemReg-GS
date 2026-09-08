@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "batch": "hssd_candidates_batch01",
+  "selection_source": "First 20 complete HSSD scene IDs after excluding the two frozen pilot scenes.",
+  "scene_ids": [
+    "102343992",
+    "102344022",
+    "102344049",
+    "102344094",
+    "102344115",
+    "102344193",
+    "102344250",
+    "102344280",
+    "102344307",
+    "102344328",
+    "102344403",
+    "102344439",
+    "102344457",
+    "102344469",
+    "102344529",
+    "102815835",
+    "102815859",
+    "102816009",
+    "102816036",
+    "102816051"
+  ],
+  "status": "pending_metadata_audit",
+  "excluded_frozen_pilot_scenes": [
+    "107734119_175999932",
+    "103997424_171030444"
+  ]
+}

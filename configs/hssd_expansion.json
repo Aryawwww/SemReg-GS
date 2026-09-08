@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "objective": "Expand the frozen SemReg-GS protocol from one pilot pair to at least ten audited HSSD source-target pairs.",
+  "target_pair_count": 10,
+  "scene_ids": [
+    "107734119_175999932",
+    "103997424_171030444"
+  ],
+  "roles": {
+    "107734119_175999932": "source_pilot",
+    "103997424_171030444": "target_pilot"
+  },
+  "selection_rules": {
+    "different_geometry_required": true,
+    "required_semantic_classes": [
+      "wall",
+      "floor",
+      "ceiling",
+      "door",
+      "window",
+      "other"
+    ],
+    "minimum_pixels_per_class_per_split": 1000,
+    "minimum_distinct_rgb_hashes_per_view_set": "equal_to_view_count",
+    "maximum_center_to_source_triangle_m": 0.00001,
+    "held_out_views_must_not_be_used_for_appearance": true
+  },
+  "pairing_policy": {
+    "pilot_pair_is_frozen": true,
+    "reuse_scene_across_new_pairs": false,
+    "pair_before_rendering": false,
+    "require_semantic_audit_before_pairing": true
+  },
+  "notes": [
+    "Add scene IDs only after confirming that the official HSSD files are accessible and the semantic audit passes.",
+    "Do not invent or silently substitute scene IDs when a requested room type or semantic class is absent.",
+    "3D-FRONT is an optional cross-dataset extension and is not a dependency of the HSSD main experiment."
+  ]
+}

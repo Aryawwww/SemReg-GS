@@ -30,7 +30,8 @@
 | Driver CUDA API | 12.7 | CUDA 11.8/12.x | 可用 |
 | Conda | 25.5.1 | 需要 | 已安装 |
 | Git | 2.51.0 | 需要 | 已安装 |
-| PyTorch CUDA | `semreg-gs-v1`: torch 2.13.0+cu126，CUDA 12.6 可用 | 需要 | 已验证 |
+| PyTorch CUDA | `semreg-gs`: 当前为 torch 2.13.0+cpu，CUDA 不可用 | 需要 | 待换装 CUDA build |
+| huggingface_hub | `semreg-gs` 当前未安装 | HSSD 扩展下载需要 | 待安装 |
 | Blender | 5.2.0 LTS（Scoop） | 数据渲染需要 | 已安装并验证 GLB 导入/渲染 |
 | CMake | 未找到 | CUDA 扩展编译需要 | 待安装 |
 | CUDA Toolkit / nvcc | 未找到 | 本地编译 rasterizer 需要 | 待安装 |
@@ -92,7 +93,7 @@ freeze_geometry: true
 2. 安装 Visual Studio 2022 Build Tools（Desktop development with C++）；
 3. 安装 CMake；
 4. 仅当决定在 Windows 本地编译 3DGS 时安装 CUDA Toolkit；
-5. 使用已创建并验证的独立 `semreg-gs-v1` Conda 环境，不污染现有 `hiv` 环境；
+5. 使用已创建并验证的独立 `semreg-gs` Conda 环境，不污染现有 `hiv` 环境；
 6. 云端使用 Linux 编译官方 CUDA rasterizer，作为主要训练环境。
 
 Windows 上编译 CUDA 扩展通常比 Ubuntu 容易出现编译器与 CUDA 版本不匹配，因此本地先完成数据闭环，主训练放到 Linux 云端。
@@ -100,25 +101,33 @@ Windows 上编译 CUDA 扩展通常比 Ubuntu 容易出现编译器与 CUDA 版�
 ## 已完成的 Stage 0 项目
 
 - [x] 审计 GPU、显存、CPU、RAM、磁盘和驱动；
-- [x] 创建并验证 `semreg-gs-v1`（Python 3.10.20）；
+- [x] 创建并验证 `semreg-gs`（Python 3.10.20）；
 - [x] 下载官方 `gaussian-splatting` 代码及 CUDA 子模块；
 - [x] 下载官方 `StyleGaussian` 代码；
 - [x] 建立 `configs/smoke.yaml`；
 - [x] 建立数据、输出和脚本目录；
-- [x] 安装 PyTorch 到 `semreg-gs-v1`；
+- [x] 恢复 `semreg-gs` Python 环境；
+- [ ] 将当前 CPU-only PyTorch 换为与本机驱动兼容的 CUDA build；
+- [ ] 安装 `huggingface_hub` 并确认 HSSD 授权仍有效；
 - [ ] 安装 CMake、Visual Studio Build Tools 和 CUDA Toolkit；Blender 5.2.0 LTS 已安装；
-- [ ] 申请并接受 3D-FRONT/3D-FUTURE 数据条款；
+- [ ] 申请并接受 3D-FRONT/3D-FUTURE 数据条款（可选扩展，不阻塞 HSSD 主实验）；
 - [ ] 申请 ScanNet++ 访问。
 
 激活命令：
 
 ```powershell
-conda activate semreg-gs-v1
+conda activate semreg-gs
 ```
 
 ## Step 1 验证记录（2026-08-18）
 
-通过 `conda run -n semreg-gs-v1` 完成独立环境验证：
+通过 `conda run -n semreg-gs` 完成独立环境验证；2026-09-02 最近一次复核结果为：
+
+- Python `3.10.20` 可用；
+- PyTorch `2.13.0+cpu` 可导入，但 `torch.cuda.is_available()` 为 `False`；
+- `huggingface_hub` 未安装；
+- HSSD 多场景下载脚本通过 `py_compile`，CLI 参数和扩展 JSON 解析通过；
+- 在 CUDA build 和下载依赖恢复前，不运行 GPU 训练或新的 HSSD 网络下载。
 
 ```text
 Python:          3.10.20
@@ -131,11 +140,15 @@ GPU matmul:      passed
 pip check:       No broken requirements found
 ```
 
-README 的 Step 1（激活独立环境并确认 CUDA/PyTorch 能识别 GPU）已完成。Blender、CMake、Visual Studio Build Tools 和 CUDA Toolkit 属于后续资产审计与本地扩展编译准备，不阻塞进入 Step 2 获取单个 HSSD 场景。
+`semreg-gs` Conda 环境已恢复，当前解释器为 Python 3.10.20。Blender、CMake、Visual Studio
+Build Tools 和 CUDA Toolkit 属于后续资产审计与本地扩展编译准备；HSSD 批量下载器的
+Python 语法检查已通过，但环境中尚缺 `huggingface_hub`，补齐该依赖前不能下载新场景。
 
 ## Step 2 数据记录（2026-08-18）
 
 - 已接受 HSSD 的 CC BY-NC 4.0 条款并通过 Hugging Face 官方设备授权登录；
+- HSSD 是当前多 pair 主数据源；场景清单与准入 gate 固定在
+  `configs/hssd_expansion.json`，3D-FRONT pending 不再作为环境阻塞项；
 - 只下载场景 `107734119_175999932`，未下载完整数据集；
 - 完整 GLB 为 78,510,308 bytes，格式为 glTF 2.0；
 - 对应场景配置包含 61 个对象实例；

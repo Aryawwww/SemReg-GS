@@ -40,15 +40,18 @@ renders + Region LPIPS + Region DINO + Leakage
 状态：进行中。
 
 - [x] 本机硬件审计；
-- [x] 创建 `semreg-gs-v1` Python 3.10 环境；
+- [x] 创建 `semreg-gs` Python 3.10 环境；
 - [x] 下载 3DGS 与 StyleGaussian 官方代码；
+- [x] 接受 HSSD CC BY-NC 4.0 条款并下载两个 pilot 场景；
 - [x] 提交 3D-FRONT Hugging Face 访问申请；
-- [ ] 3D-FRONT 申请获批；
+- [ ] 3D-FRONT 申请获批（可选跨数据集扩展，不阻塞主线）；
 - [ ] 安装 PyTorch、Blender、CMake；
-- [ ] 只下载并校验 3D-FRONT/3D-FUTURE 所需文件；
+- [ ] 按 `configs/hssd_expansion.json` 下载并审计 HSSD 候选场景；
+- [ ] 若 3D-FRONT 获批，只下载并校验扩展实验所需文件；
 - [ ] 记录数据许可和具体版本。
 
-完成条件：能够读取一个 room JSON、加载结构 mesh 和材质，并输出 scene summary。
+完成条件：至少十个不同几何 HSSD pair 通过资产、语义、相机覆盖和许可审计；
+3D-FRONT 是否获批不作为完成条件。
 
 ### WP1：Level-1 单样本数据闭环
 
@@ -98,6 +101,8 @@ outputs/stage1/<pair_id>/
 - [x] 实现 rendered Gaussian semantic 与 held-out proxy semantic 的 confusion/IoU 审计（待运行）；
 - [x] 完成 semantic alignment audit：overall agreement 69.81%，view_07 仅 40.24%，主要为 other→wall/floor；
 - [x] 实现 intrinsic spill 与 proxy-label apparent spill 分解（待运行）；
+- [x] 完成 spill 分解：intrinsic spill=0，proxy apparent spill 约 100% 由标签/可见性不一致解释；
+- [x] 为 point renderer 实现可选 mesh-depth occlusion gate，并增加 gated alignment 复核入口（待运行）；
 - [ ] 冻结 evaluation-only Region DINO/LPIPS 的模型、权重哈希、预处理和 mask aggregation；
 - [ ] 用正式 Gaussian rasterizer 复核低覆盖 point-zbuffer 结果。
 
@@ -209,9 +214,12 @@ nearest-prototype leakage 不用于 Gate B 判定。
 
 ## 近期行动顺序
 
-1. 等待 3D-FRONT 访问批准；
-2. 同时完成 PyTorch、Blender 和本地渲染环境；
-3. 获批后只做 WP1 的 1 donor + 1 target；
-4. 不下载无关模型，不运行 TRELLIS.2；
-5. WP1 通过后立即实现 Global、B_sem-2D、Semantic；
-6. 得到首张四列对比图后，再决定是否投入 StyleGaussian 改造。
+1. 在已恢复的 `semreg-gs` 中将 CPU-only PyTorch 换为 CUDA build、补装
+   `huggingface_hub`，并复核 Blender 本地渲染；
+2. 从 HSSD 候选池逐批下载场景，先做资产与六类语义审计，不先批量渲染；
+3. 将通过审计的场景写入 `configs/hssd_expansion.json`，冻结 pair 后再生成多视角数据；
+4. 将当前单 pair 协议扩展到至少 10 个不同几何 HSSD pairs；
+5. 对每个 pair 运行相同的四方法、held-out、intervention、alignment 与 geometry gates；
+6. 汇总 paired delta、95% CI、effect size，并报告失败场景而非静默剔除；
+7. 3D-FRONT 审批继续并行等待；若获批，仅作为跨数据集扩展；
+8. HSSD 多 pair 证据闭环完成后，再投入 StyleGaussian、MaterialMVP 或 TRELLIS.2。

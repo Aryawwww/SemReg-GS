@@ -30,7 +30,7 @@ set "PAIR_DATA=data\processed\pairs\%PAIR_ID%"
 "%BLENDER%" -b --python-exit-code 1 --python scripts\render_hssd_multiview.py -- --input "%RAW%\scene.glb" --semantic-config "%RAW%\semantic_config.json" --camera-plan "%PLAN%" --output "%OUTPUT%" --width 512 --height 512
 if errorlevel 1 exit /b 1
 
-call conda run -n semreg-gs-v1 python scripts\freeze_consistency_protocol.py --base-protocol "%PAIR_DATA%\protocol_manifest.json" --consistency-multiview "%OUTPUT%" --render-manifest "%OUTPUT%\render_manifest.json" --output "%PAIR_DATA%\protocol_consistency_v2.json"
+call conda run -n semreg-gs python scripts\freeze_consistency_protocol.py --base-protocol "%PAIR_DATA%\protocol_manifest.json" --consistency-multiview "%OUTPUT%" --render-manifest "%OUTPUT%\render_manifest.json" --output "%PAIR_DATA%\protocol_consistency_v2.json"
 if errorlevel 1 exit /b 1
 
 echo Consistency views rendered and protocol v2 frozen.

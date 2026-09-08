@@ -14,7 +14,7 @@ rasterizer。单个 source→target pair 的 cross-geometry pilot 已跑通 Glob
 
 | 阶段 | 状态 | 已得到的结果 |
 |---|---|---|
-| 环境与 HSSD 下载 | 部分失效 | HSSD、Blender 和 DINOv2 缓存仍在；原 `semreg-gs-v1` Conda 环境当前不存在，需恢复 PyTorch/CUDA 环境 |
+| 环境与 HSSD 下载 | 部分完成 | `semreg-gs` 已恢复（Python 3.10.20），但当前 PyTorch 为 2.13.0+cpu、CUDA 不可用，且缺少 `huggingface_hub`；已有 HSSD、Blender 和 DINOv2 缓存仍在 |
 | Source 资产与语义审计 | 完成 | 486 meshes、530,720 polygons；六类逐面映射可复现 |
 | 原始 3 donor / 8 target 多模态渲染 | 完成 | 512×512 RGB/semantic/depth/normal/camera；11/11 RGB 哈希不同 |
 | CAD-anchored Gaussian 初始化 | 完成 | 100,000 Gaussians；最大几何重建误差 `1.134145e-6 m` |
@@ -253,6 +253,24 @@ semantic ID 计算 intrinsic spill，同时统计 proxy apparent spill 中有多
 `rendered=edited class, proxy!=edited class`。只有 intrinsic spill 才直接衡量表示的区域隔离；
 proxy disagreement 应作为数据/标签对齐指标单独报告。
 
+### 14. Spill decomposition 结果
+
+Step 22 对 B_sem-2D 与 Semantic-DINO 的六类均得到 `intrinsic_spill_l1=0`、
+`intrinsic_selectivity=1.0`。proxy apparent spill 的变化量几乎 `100%` 落在
+`rendered semantic=edited class` 但 `proxy semantic!=edited class` 的像素上。wall 的
+1,688.39 total apparent-spill change 全部来自 11,330 个此类像素；floor 的 392.20 change
+全部来自 2,609 个此类像素。
+
+因此 semantic selector 的表示内部隔离在当前离散 renderer 上是严格成立的；此前的
+非零 spill 不能解释为 appearance 跨类泄漏。结合 `other→wall/floor` 方向，最可能原因是
+point-zbuffer 只在稀疏 Gaussian 点之间进行遮挡，后方结构点通过前景家具点云空洞投影，
+而 held-out proxy 表示完整 mesh 的首个可见表面。
+
+Step 23 为 renderer 增加可选 mesh-depth occlusion gate：比较 Gaussian 的 camera-ray
+distance 与冻结 target mesh depth，丢弃位于首个 mesh surface 后方超过 0.05 m 的点。
+先只重渲染 Semantic-2D 并重复 alignment audit；若 `other→wall/floor` 与 view_07 mismatch
+显著下降，再将相同 gate 应用于四方法正式重评估。
+
 ## 已运行但未形成完整实验的内容
 
 ### 7 donor / 16 target 临时重跑
@@ -284,7 +302,8 @@ proxy disagreement 应作为数据/标签对齐指标单独报告。
    resize/crop 和 mask aggregation 规则。
 3. 将 point-zbuffer baseline 替换或补充为正式各向异性 CUDA Gaussian rasterizer，
    重新报告 coverage、held-out 指标与 warp error。
-4. 扩展到至少 10 个 HSSD pairs，报告 paired delta、95% CI、effect size 和统计检验。
+4. 以 `configs/hssd_expansion.json` 为唯一候选清单，扩展到至少 10 个 HSSD pairs，
+   报告 paired delta、95% CI、effect size 和统计检验；3D-FRONT 审批不阻塞此步骤。
 5. 加入 StyleGaussian、MaterialMVP whole-room、MaterialMVP semantic-submesh、TRELLIS.2。
 6. 之后再扩展 3D-FRONT，并用 OpenRooms 检查材质/光照解耦、ScanNet++ 检查真实域。
 
@@ -319,6 +338,28 @@ pilot 通过后扩展到 10 pairs，再加入强 baseline。主要判断依据�
 DINO/LPIPS、leakage、multi-view consistency 和 geometry preservation，不能依据单张
 最好看的图。
 
+HSSD 扩展采用“先审计、后配对、再渲染”的顺序：
+
+```text
+候选 scene ID
+  → scripts/download_hssd_smoke.py --scene-list configs/hssd_expansion.json
+  → HSSD 资产与六类语义审计
+  → 将通过审计的场景角色与 pair 冻结到配置/manifest
+  → scene-aware 多视角与 coverage gate
+  → 四方法和统一 held-out 评估
+  → 跨 pair 统计
+```
+
+`download_hssd_smoke.py` 保留无参数的旧 smoke 用法，同时支持重复传入 `--scene-id`
+或使用 `--scene-list` 批量下载。配置中不得为了凑足数量虚构 scene ID；缺类、低覆盖或
+资产不完整的候选必须保留审计失败记录。默认不复用场景组成新的 pair，避免统计样本间
+共享同一几何造成伪重复。
+
+候选批次应先使用 `--metadata-only`。该模式跳过大型 `scene.glb`，并写入独立的
+`metadata_manifest.json`，不会覆盖完整场景的 `manifest.json`。第一批 20 个候选固定在
+`configs/hssd_candidates_batch01.json`；只有通过 metadata/semantic audit 的场景才允许
+进入完整 GLB 下载清单。
+
 ## 关键入口与产物
 
 ```text
@@ -339,6 +380,10 @@ scripts/run_step19_semantic_interventions.cmd 单类别编辑的 target response
 scripts/run_step20_boundary_sensitivity.cmd   semantic intervention 的边界腐蚀敏感性评估
 scripts/run_step21_semantic_alignment_audit.cmd rendered Gaussian semantic 与 held-out proxy 对齐审计
 scripts/run_step22_spill_decomposition.cmd     intrinsic spill 与 proxy-label apparent spill 分解
+scripts/run_step23_depth_gated_alignment.cmd   mesh-depth occlusion gate 与 semantic alignment 复核
+scripts/download_hssd_smoke.py         单场景兼容入口及 HSSD 多场景清单下载
+configs/hssd_expansion.json            HSSD 候选、选择 gate 与配对策略
+configs/hssd_candidates_batch01.json   第一批 20 个 metadata-only 预审计候选
 
 outputs/smoke/107734119_175999932/    source smoke 与历史结果
 data/splits/107734119_175999932_split.json
@@ -360,7 +405,7 @@ outputs/pairs/107734119_175999932__to__103997424_171030444/pilot_four_method_met
 ## 数据与许可
 
 - HSSD：当前 smoke/pilot 主数据，CC BY-NC 4.0。
-- 3D-FRONT/3D-FUTURE：获批后用于扩大规模和对齐房间级 baseline。
+- 3D-FRONT/3D-FUTURE：获批后仅用于跨数据集扩展和对齐房间级 baseline，不阻塞 HSSD 主实验。
 - OpenRooms：用于材质与光照解耦消融。
 - ScanNet++：用于 synthetic-to-real 验证。
 

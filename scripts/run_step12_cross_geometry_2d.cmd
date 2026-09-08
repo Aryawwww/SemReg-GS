@@ -18,11 +18,11 @@ set "TARGET_VIEWS=outputs\pairs\%PAIR_ID%\target_multiview\target_views"
 set "MAPPING=data\processed\targets\%TARGET_ID%\semantic_mapping.json"
 set "OUTPUT=outputs\pairs\%PAIR_ID%\cross_geometry_2d"
 
-call conda run -n semreg-gs-v1 python scripts\build_step7_baselines.py --gaussians "%GAUSSIANS%" --donor-views "%DONORS%" --semantic-mapping "%MAPPING%" --protocol-manifest "%PROTOCOL%" --output "%OUTPUT%\appearance"
+call conda run -n semreg-gs python scripts\build_step7_baselines.py --gaussians "%GAUSSIANS%" --donor-views "%DONORS%" --semantic-mapping "%MAPPING%" --protocol-manifest "%PROTOCOL%" --output "%OUTPUT%\appearance"
 if errorlevel 1 exit /b 1
 
 for %%M in (global semantic_2d) do (
-  call conda run -n semreg-gs-v1 python scripts\render_semantic_gaussians.py --gaussians "%GAUSSIANS%" --appearance "%OUTPUT%\appearance\%%M\appearance.npz" --views "%TARGET_VIEWS%" --semantic-mapping "%MAPPING%" --protocol-manifest "%PROTOCOL%" --protocol-split target_heldout --output "%OUTPUT%\renders\%%M" --mode both --point-radius 1 --device cuda
+  call conda run -n semreg-gs python scripts\render_semantic_gaussians.py --gaussians "%GAUSSIANS%" --appearance "%OUTPUT%\appearance\%%M\appearance.npz" --views "%TARGET_VIEWS%" --semantic-mapping "%MAPPING%" --protocol-manifest "%PROTOCOL%" --protocol-split target_heldout --output "%OUTPUT%\renders\%%M" --mode both --point-radius 1 --device cuda
   if errorlevel 1 exit /b 1
 )
 
