@@ -30,8 +30,8 @@
 | Driver CUDA API | 12.7 | CUDA 11.8/12.x | 可用 |
 | Conda | 25.5.1 | 需要 | 已安装 |
 | Git | 2.51.0 | 需要 | 已安装 |
-| PyTorch CUDA | `semreg-gs`: 当前为 torch 2.13.0+cpu，CUDA 不可用 | 需要 | 待换装 CUDA build |
-| huggingface_hub | `semreg-gs` 当前未安装 | HSSD 扩展下载需要 | 待安装 |
+| PyTorch CUDA | `semreg-gs`: torch 2.13.0+cu126，CUDA 12.6 可用 | 需要 | 已验证 |
+| huggingface_hub | `semreg-gs`: 1.29.0，HSSD 三仓库可访问 | HSSD 扩展下载需要 | 已验证 |
 | Blender | 5.2.0 LTS（Scoop） | 数据渲染需要 | 已安装并验证 GLB 导入/渲染 |
 | CMake | 未找到 | CUDA 扩展编译需要 | 待安装 |
 | CUDA Toolkit / nvcc | 未找到 | 本地编译 rasterizer 需要 | 待安装 |
@@ -107,8 +107,10 @@ Windows 上编译 CUDA 扩展通常比 Ubuntu 容易出现编译器与 CUDA 版�
 - [x] 建立 `configs/smoke.yaml`；
 - [x] 建立数据、输出和脚本目录；
 - [x] 恢复 `semreg-gs` Python 环境；
-- [ ] 将当前 CPU-only PyTorch 换为与本机驱动兼容的 CUDA build；
-- [ ] 安装 `huggingface_hub` 并确认 HSSD 授权仍有效；
+- [x] 安装与本机驱动兼容的 CUDA 12.6 PyTorch build；
+- [x] 安装 `huggingface_hub` 并确认 HSSD 授权有效；
+- [x] 安装 CUDA Toolkit 12.6 与 MSVC 14.44；
+- [ ] 验证 Blender headless PATH 和正式 3DGS CUDA extension；
 - [ ] 安装 CMake、Visual Studio Build Tools 和 CUDA Toolkit；Blender 5.2.0 LTS 已安装；
 - [ ] 申请并接受 3D-FRONT/3D-FUTURE 数据条款（可选扩展，不阻塞 HSSD 主实验）；
 - [ ] 申请 ScanNet++ 访问。
@@ -121,13 +123,14 @@ conda activate semreg-gs
 
 ## Step 1 验证记录（2026-08-18）
 
-通过 `conda run -n semreg-gs` 完成独立环境验证；2026-09-02 最近一次复核结果为：
+通过 `conda run -n semreg-gs` 完成独立环境验证；2026-09-09 最近一次复核结果为：
 
 - Python `3.10.20` 可用；
-- PyTorch `2.13.0+cpu` 可导入，但 `torch.cuda.is_available()` 为 `False`；
-- `huggingface_hub` 未安装；
+- PyTorch `2.13.0+cu126`，`torch.cuda.is_available()` 为 `True`；
+- `huggingface_hub` `1.29.0`，HSSD 仓库授权与下载已验证；
+- `nvcc` 12.6 和 MSVC 14.44 已安装；MSVC 需通过 `vcvarsall.bat` 激活；
 - HSSD 多场景下载脚本通过 `py_compile`，CLI 参数和扩展 JSON 解析通过；
-- 在 CUDA build 和下载依赖恢复前，不运行 GPU 训练或新的 HSSD 网络下载。
+- Blender 尚未出现在普通 shell PATH；正式 rasterizer 编译与 headless render 尚待 smoke test。
 
 ```text
 Python:          3.10.20
@@ -142,7 +145,8 @@ pip check:       No broken requirements found
 
 `semreg-gs` Conda 环境已恢复，当前解释器为 Python 3.10.20。Blender、CMake、Visual Studio
 Build Tools 和 CUDA Toolkit 属于后续资产审计与本地扩展编译准备；HSSD 批量下载器的
-Python 语法检查已通过，但环境中尚缺 `huggingface_hub`，补齐该依赖前不能下载新场景。
+Python 语法检查、HSSD metadata/full-scene 下载和 manifest 生成已通过；当前环境剩余阻塞项
+是 Blender headless PATH 与正式 3DGS CUDA extension smoke test。
 
 ## Step 2 数据记录（2026-08-18）
 
